@@ -195,4 +195,16 @@ graph TD
 
 **Dan Hrubý** [ORCID: 0009-0009-7109-9734](https://orcid.org/0009-0009-7109-9734)
 
-*Part of the [HEALTH.Lab](https://www.fei.vsb.cz/450/en/science-and-research/labs/HEALTHlab/) research.* 
+*Part of the [HEALTH.Lab](https://www.fei.vsb.cz/450/en/science-and-research/labs/HEALTHlab/) research.*
+
+---
+
+## License
+
+DARTscope is released under the [MIT License](LICENSE) — free to use, modify, and distribute.
+
+If you use DARTscope in your research or work, please reference it as:
+
+> Daniel Barvík, Dan Hrubý. *DARTscope* (2025). GitHub: https://github.com/HealthLabVSB/DARTscope
+
+A machine-readable citation is available in [CITATION.cff](CITATION.cff). 

@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use DARTscope in your research or work, please cite it using the metadata below."
+title: "DARTscope"
+version: "1.0"
+date-released: "2025-01-01"
+license: MIT
+repository-code: "https://github.com/HealthLabVSB/DARTscope"
+abstract: >
+  A comprehensive, high-performance suite of tools for inspecting, processing,
+  and visualizing TI mmWave radar data captured using the DCA1000 EVM. DARTscope
+  provides a full-featured GUI for detailed signal analysis and lightweight CLI
+  scripts for quick visualization.
+authors:
+  - family-names: "Barvík"
+    given-names: "Daniel"
+    orcid: "https://orcid.org/0000-0001-7699-8792"
+    affiliation: "HEALTH.Lab, Faculty of Electrical Engineering and Computer Science, VSB – Technical University of Ostrava"
+  - family-names: "Hrubý"
+    given-names: "Dan"
+    orcid: "https://orcid.org/0009-0009-7109-9734"
+    affiliation: "HEALTH.Lab, Faculty of Electrical Engineering and Computer Science, VSB – Technical University of Ostrava"
+keywords:
+  - mmWave
+  - radar
+  - signal-processing
+  - TI DCA1000
+  - range-Doppler
+  - angle-of-arrival
+  - biometrics
