@@ -1,0 +1,33 @@
+MIT License
+
+Copyright (c) 2025 Daniel Barvík, Dan Hrubý
+HEALTH.Lab, Faculty of Electrical Engineering and Computer Science,
+VSB – Technical University of Ostrava
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+If you use DARTscope in your research or work, please cite it as:
+
+  Daniel Barvík, Dan Hrubý. DARTscope (2025).
+  GitHub: https://github.com/HealthLabVSB/DARTscope
+
+  Daniel Barvík  — ORCID: https://orcid.org/0000-0001-7699-8792
+  Dan Hrubý      — ORCID: https://orcid.org/0009-0009-7109-9734
