@@ -22,6 +22,9 @@ import sys
 LVDS_LANE_RE = re.compile(r'API:LvdsLaneConfig,([\d,]+)', re.IGNORECASE)
 
 
+C_LIGHT = 299792458.0   # exact, not 3e8
+
+
 def compute_start_freqs(start_freq_const: int):
     """Return (freq_60_GHz, freq_77_GHz) candidates from raw startFreqConst."""
     freq_60 = (start_freq_const / (2**26)) * 2.7
@@ -38,14 +41,133 @@ def _next_pow2(n: int) -> int:
     return p
 
 def find_log_file(bin_path):
+    if not bin_path:
+        return None
     folder, bin_name = os.path.split(bin_path)
-    if '_Raw_0.bin' in bin_name:
-        base = bin_name.replace('_Raw_0.bin', '')
+    
+    # Robustly find prefix: match ..._Raw_0.bin or ..._0.bin
+    match = re.search(r'^(.*?)(?:_Raw)?_(\d+)\.bin$', bin_name)
+    if match:
+        base = match.group(1)
     else:
         base = os.path.splitext(bin_name)[0]
+        # remove _Raw if present at the end of single file
+        if base.endswith('_Raw'):
+            base = base[:-4]
+
     log_name = f"{base}_LogFile.txt"
     log_path = os.path.join(folder, log_name)
-    return log_path if os.path.isfile(log_path) else None
+    if os.path.isfile(log_path):
+        return log_path
+    
+    # Fallback to older logic if re search fails or file not found
+    if '_Raw_0.bin' in bin_name:
+        base_fallback = bin_name.replace('_Raw_0.bin', '')
+        fallback_path = os.path.join(folder, f"{base_fallback}_LogFile.txt")
+        if os.path.isfile(fallback_path):
+            return fallback_path
+            
+    return None
+
+def find_raw_log_csv(log_path):
+    """The recorder's own _Raw_LogFile.csv that sits next to the API log."""
+    if not log_path:
+        return None
+    for cand in (log_path.replace("_LogFile.txt", "_Raw_LogFile.csv"),
+                 log_path.replace("_LogFile.txt", "_Raw_LogFile.CSV")):
+        if cand != log_path and os.path.isfile(cand):
+            return cand
+    return None
+
+
+_RECORDER_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+_RECORDER_TIME_RE = re.compile(
+    r"[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s+(\d{4})")
+
+
+def parse_recorder_time(value):
+    """
+    Read 'Wed Oct 22 15:06:12 2025' the way the recorder writes it.
+
+    Deliberately not strptime with %a/%b: those follow LC_TIME, and any library that
+    calls setlocale would then make this fail on a file that is always written with
+    English abbreviations.
+    """
+    if not value:
+        return None
+    m = _RECORDER_TIME_RE.search(value)
+    if not m:
+        return None
+    month = _RECORDER_MONTHS.get(m.group(1).lower())
+    if not month:
+        return None
+    try:
+        return datetime(int(m.group(6)), month, int(m.group(2)),
+                        int(m.group(3)), int(m.group(4)), int(m.group(5)))
+    except ValueError:
+        return None
+
+
+def parse_raw_log_csv(csv_path):
+    """
+    Read the recorder's own log: lane mode, packet counts, capture duration.
+
+    This file was never read, and it is the only place that says what the DCA1000
+    itself was doing. Its lane mode describes the width of the container the samples
+    are written into, which is not the same thing as the radar's LaneConfig mask - on an
+    AWR1642 capture recorded with one active lane into a recorder running in 2-lane
+    mode, every second int16 in the file is an empty slot. It also reports lost packets
+    first-hand, instead of us inferring them from zeros in the data.
+    """
+    out = {}
+    if not csv_path or not os.path.isfile(csv_path):
+        return out
+    try:
+        with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except Exception as exc:
+        print(f"[parse_raw_log_csv] Could not read {csv_path}: {exc}")
+        return out
+
+    patterns = {
+        "dca_lane_mode": (r"LVDS lane mode\s*:\s*(\d+)\s*lane", int),
+        "dca_log_mode": (r"Log mode\s*:\s*([A-Za-z]+)", str),
+        "dca_stop_mode": (r"Record stop mode\s*:\s*([A-Za-z]+)", str),
+        "dca_packets_received": (r"Number of received packets\s*-\s*(\d+)", int),
+        "dca_packets_zero_filled": (r"Number of zero filled packets\s*-\s*(\d+)", int),
+        "dca_bytes_zero_filled": (r"Number of zero filled bytes\s*-\s*(\d+)", int),
+        "dca_out_of_sequence": (r"Out of sequence count\s*-\s*(\d+)", int),
+        "dca_first_packet_id": (r"First Packet ID\s*-\s*(\d+)", int),
+        "dca_last_packet_id": (r"Last Packet ID\s*-\s*(\d+)", int),
+        "dca_duration_s": (r"Duration\(sec\)\s*-\s*(\d+)", int),
+    }
+    # When the capture actually began, which is the only wall clock in the whole
+    # capture that a reference recording can be lined up against.
+    for key, pat in (("dca_capture_start", r"Capture start time\s*-\s*(.+)"),
+                     ("dca_capture_end", r"Capture end time\s*-\s*(.+)")):
+        m = re.search(pat, text, re.IGNORECASE)
+        dt = parse_recorder_time(m.group(1)) if m else None
+        if dt:
+            out[key] = dt.strftime("%d-%m-%Y %H:%M:%S")
+            out[key + "_timestamp"] = dt.timestamp()
+
+    for key, (pat, cast) in patterns.items():
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                out[key] = cast(m.group(1))
+            except Exception:
+                pass
+
+    exp = out.get("dca_last_packet_id")
+    got = out.get("dca_packets_received")
+    if exp and got is not None and exp > 0:
+        out["dca_packet_loss_pct"] = 100.0 * (exp - got) / float(exp)
+    out["dca_csv_path"] = csv_path
+    return out
+
 
 # NEW: chip → band mapper
 def map_chip_to_band(chip_name: str):
@@ -57,45 +179,6 @@ def map_chip_to_band(chip_name: str):
     if '1642' in c or '1843' in c or '1443' in c or '16XX' in c or '18XX' in c:
         return '77'
     return None
-
-# NEW: Simplified parser based on user rules
-def parse_mmwave_log(log_lines: list) -> dict:
-    """
-    Parses log lines to find the last DataFmtConfig and returns format parameters.
-    Rules:
-      - adcBits from 2nd param (0=12, 1=14, 2=16)
-      - isComplex from 3rd param (1=Complex, 0=Real)
-      - iqSwap from 4th param (1=QI, 0=IQ)
-      - isInterleaved from 6th param (1=interleaved, 0=non-interleaved)  # UPDATED
-      - rxMask from 1st param
-    """
-    data_fmt_line = None
-    for line in reversed(log_lines):
-        if 'API:DataFmtConfig' in line:
-            data_fmt_line = line
-            break
-    if not data_fmt_line:
-        raise ValueError("DataFmtConfig not found in log.")
-
-    try:
-        payload = data_fmt_line.split('API:DataFmtConfig,', 1)[1]
-        nums = [int(t) for t in payload.strip().split(',') if t != '']
-    except (IndexError, ValueError):
-        raise ValueError("Failed to parse DataFmtConfig line.")
-
-    if len(nums) < 6:
-        raise ValueError(f"DataFmtConfig has too few parameters: {nums}")
-
-    adc_bits_map = {0: 12, 1: 14, 2: 16}
-
-    return {
-        "rxMask": nums[0],
-        "adcBits": adc_bits_map.get(nums[1], 16),
-        "isComplex": (nums[2] == 1),
-        "iqSwap": (nums[3] == 1),
-        "isInterleaved": (nums[5] == 1),  # UPDATED mapping
-    }
-
 
 # NEW: helper for DataFmtConfig parsing
 def _decode_data_fmt(values):
@@ -139,38 +222,133 @@ def _decode_data_fmt(values):
 
 # NEW: TX enable decoder
 def decode_tx_enable(mask: int):
+    """
+    Human-readable transmitter list for a ChirpConfig txEnable mask.
+
+    Two things were wrong. Bit 0 was named TX0, but TI numbers transmitters from one, so
+    every label was one below the name on the datasheet. And only three bits were read,
+    so a four-transmitter mask silently lost one: mask 12 (bits 2 and 3) came out as a
+    single "TX2". These names drive the chirp selector, where two chirps differing only
+    in the dropped bit would have been indistinguishable.
+    """
     if mask is None:
         return ""
-    txs = [f"TX{i}" for i in range(3) if (mask >> i) & 1]
+    mask = int(mask)
+    if mask <= 0:
+        return "None"
+    txs = [f"TX{i + 1}" for i in range(mask.bit_length()) if (mask >> i) & 1]
     return ",".join(txs) if txs else "None"
+
+def extract_tokens(line, api_prefix, lua_prefix):
+    # Try API format first
+    if api_prefix in line:
+        try:
+            payload = line.split(api_prefix, 1)[1]
+            payload = payload.strip().strip(',')
+            return [tok.strip() for tok in payload.split(',') if tok.strip() != '']
+        except Exception:
+            pass
+    # Try Lua format
+    if lua_prefix in line:
+        try:
+            start = line.find(lua_prefix)
+            p_start = line.find('(', start)
+            p_end = line.rfind(')')
+            if p_start != -1 and p_end != -1 and p_end > p_start:
+                payload = line[p_start+1:p_end]
+                return [tok.strip() for tok in payload.split(',') if tok.strip() != '']
+        except Exception:
+            pass
+    return None
 
 # NEW regex for Frame / AdvancedFrame
 FRAME_RE = re.compile(r'API:FrameConfig,([\d,]+)')
 ADV_FRAME_RE = re.compile(r'API:AdvancedFrameConfig,([\d,]+)')
 
-def parse_frame_config_line(line: str):
+def _score_frame_layout(start_idx, end_idx, chirp_ranges):
     """
-    Expected pattern (8 integers):
-      frameCfgIdx, chirpStartIdx, chirpEndIdx, numLoops, framePeriodicity_ticks,
-      triggerSelect, numFrames, triggerDelay
-    Note: framePeriodicity is in 5ns ticks.
-    Example:
-      API:FrameConfig,0,1,250,255,8000000,0,300,0,
+    How well a candidate chirp range matches the chirps the log actually defines.
+
+    Returns (covered_fraction, unique_chirps). A frame can only transmit chirps that
+    ChirpConfig defined, so a candidate claiming chirps 2..1200 when only 0..2 exist
+    is wrong no matter how plausible the field order looks.
     """
-    m = FRAME_RE.search(line)
-    if not m:
-        return None
-    parts = [p for p in m.group(1).split(',') if p != '']
-    if len(parts) < 8:
-        return None
+    if end_idx < start_idx:
+        return -1.0, 0
+    n = end_idx - start_idx + 1
+    if not chirp_ranges:
+        return 0.0, n
+    covered = 0
+    for c_idx in range(start_idx, end_idx + 1):
+        if any(s <= c_idx <= e for s, e in chirp_ranges):
+            covered += 1
+    return covered / float(n), n
+
+
+def parse_frame_config_line(line: str, chirp_ranges=None):
+    """
+    Parse an API:FrameConfig line.
+
+    mmWave Studio logs this line in two shapes that both carry 8 integers:
+      A) frameCfgIdx, chirpStartIdx, chirpEndIdx, numLoops, periodicity,
+         triggerSelect, numFrames, triggerDelay
+      B) chirpStartIdx, chirpEndIdx, numFrames, numLoops, periodicity,
+         triggerSelect, <reserved>, triggerDelay
+
+    Assuming A unconditionally silently mangled shape-B logs: a real capture with
+    chirps 0..2 was read as chirps 2..1200, which then produced a rotated
+    tx_order_masks pattern and therefore a scrambled MIMO virtual array. The layout is
+    now chosen by checking the candidate chirp range against the chirps ChirpConfig
+    actually defines (chirp_ranges), falling back to the smaller, plausible range.
+
+    Note: framePeriodicity is in 5 ns ticks.
+    """
+    parts = extract_tokens(line, 'API:FrameConfig,', 'ar1.FrameConfig')
+    if not parts or len(parts) < 8:
+        # Fallback to old regex
+        m = FRAME_RE.search(line)
+        if not m:
+            return None
+        parts = [p for p in m.group(1).split(',') if p != '']
+        if len(parts) < 8:
+            return None
     try:
         vals = list(map(int, parts[:8]))
     except ValueError:
         return None
-    frameCfgIdx, chirpStartIdx, chirpEndIdx, numLoops, framePeriodicity_ticks, triggerSelect, numFrames, triggerDelay = vals
+
+    cand_a = {'frameCfgIdx': vals[0], 'chirpStartIdx': vals[1], 'chirpEndIdx': vals[2],
+              'numLoops': vals[3], 'numFrames': vals[6]}
+    cand_b = {'frameCfgIdx': 0, 'chirpStartIdx': vals[0], 'chirpEndIdx': vals[1],
+              'numFrames': vals[2], 'numLoops': vals[3]}
+
+    score_a, n_a = _score_frame_layout(cand_a['chirpStartIdx'], cand_a['chirpEndIdx'], chirp_ranges)
+    score_b, n_b = _score_frame_layout(cand_b['chirpStartIdx'], cand_b['chirpEndIdx'], chirp_ranges)
+
+    if chirp_ranges:
+        chosen = cand_a if score_a >= score_b else cand_b
+        if score_a < 1.0 and score_b < 1.0:
+            print(f"[parse_frame_config_line] WARNING: neither FrameConfig layout fully "
+                  f"matches the defined chirps (coverage {score_a:.2f} vs {score_b:.2f}); "
+                  f"using chirps {chosen['chirpStartIdx']}..{chosen['chirpEndIdx']}.")
+    else:
+        # No ChirpConfig to check against: prefer the layout with a sane chirp count.
+        a_ok = 1 <= n_a <= 64
+        b_ok = 1 <= n_b <= 64
+        chosen = cand_a if (a_ok or not b_ok) else cand_b
+
+    frameCfgIdx = chosen['frameCfgIdx']
+    chirpStartIdx = chosen['chirpStartIdx']
+    chirpEndIdx = chosen['chirpEndIdx']
+    numLoops = chosen['numLoops']
+    numFrames = chosen['numFrames']
+    framePeriodicity_ticks = vals[4]
+    triggerSelect = vals[5]
+    triggerDelay = vals[7]
 
     # Convert from 5ns ticks to microseconds
     framePeriodicity_us = framePeriodicity_ticks * 5.0 / 1000.0
+    framePeriodicity_ms = framePeriodicity_ticks * 5.0 / 1000000.0
 
     uniqueChirps = (chirpEndIdx - chirpStartIdx + 1) if chirpEndIdx >= chirpStartIdx else None
     chirpsPerFrame = (uniqueChirps * numLoops) if (uniqueChirps is not None) else None
@@ -198,10 +376,12 @@ def parse_advanced_frame_config_line(line: str):
     Example (shortened):
       API:AdvancedFrameConfig,1,0,0,0,2,255,8000000,0,1,1,8000000,...
     """
-    m = ADV_FRAME_RE.search(line)
-    if not m:
-        return None
-    parts = [p for p in m.group(1).split(',') if p != '']
+    parts = extract_tokens(line, 'API:AdvancedFrameConfig,', 'ar1.AdvancedFrameConfig')
+    if not parts:
+        m = ADV_FRAME_RE.search(line)
+        if not m:
+            return None
+        parts = [p for p in m.group(1).split(',') if p != '']
     ints = []
     for p in parts:
         try:
@@ -215,15 +395,29 @@ def parse_advanced_frame_config_line(line: str):
         "adv_frameHeader": ints[0],
         "adv_numSubFrames": ints[4] if len(ints) > 4 else None
     }
-    # Heuristically select periods (values ~millions of us)
-    periodicities = [v for v in ints if isinstance(v, int) and v and v >= 100000]
-    if periodicities:
-        adv["adv_periodicities_us"] = periodicities
-    # For convenience the first two
-    if len(periodicities) >= 1:
-        adv["adv_periodicity_1_us"] = periodicities[0]
-    if len(periodicities) >= 2:
-        adv["adv_periodicity_2_us"] = periodicities[1]
+    # Heuristically select periods (values ~millions of us or ticks)
+    # If the value is very large (e.g. 2,000,000), it's likely ticks or us.
+    # User's case: 2,000,000 ticks = 10ms. 2,000,000 us = 2000ms.
+    # We should distinguish them. Usually, if it's > 500,000 and the user says it's 10ms, it's ticks.
+    # But wait, 2,000,000 us is also a valid period (2s).
+    # However, mmWave Studio often logs periodicity in 5ns ticks in both configs.
+    periodicities_raw = [v for v in ints if isinstance(v, int) and v and v >= 1000]
+    
+    # NEW logic: Convert periodicities. If we suspect they are ticks (e.g. they match FrameConfig ticks),
+    # we convert them from 5ns ticks to us. 
+    # For now, let's assume they might be ticks and provide both, or prefer ticks if very large.
+    # Actually, the user's log shows periodicities_us=[2000000, 2000000]. 
+    # If we treat 2000000 as us, it's 2000ms. If we treat it as 5ns ticks, it's 10ms.
+    # Since FrameConfig has framePeriodicity_ticks=2000000, it's almost certain AdvancedFrameConfig also uses ticks.
+    
+    adv["adv_periodicities_ticks"] = periodicities_raw
+    periodicities_us = [v * 5.0 / 1000.0 for v in periodicities_raw]
+    adv["adv_periodicities_us"] = periodicities_us
+    
+    if periodicities_us:
+        adv["adv_periodicity_1_us"] = periodicities_us[0]
+    if len(periodicities_us) >= 2:
+        adv["adv_periodicity_2_us"] = periodicities_us[1]
     return adv
 
 def _start_var_to_GHz(start_freq_var_raw: int, band: str) -> float:
@@ -232,16 +426,19 @@ def _start_var_to_GHz(start_freq_var_raw: int, band: str) -> float:
     mult = 3.6 if band == '77' else 2.7
     return (start_freq_var_raw / (2**26)) * mult
 
-def _sum_defined_unique_chirps(chirps_list):
-    if not chirps_list:
-        return 0
-    total = 0
-    for ch in chirps_list:
-        cs = ch.get('chirpStartIdx')
-        ce = ch.get('chirpEndIdx')
-        if isinstance(cs, int) and isinstance(ce, int) and ce >= cs:
-            total += (ce - cs + 1)
-    return total
+def find_repeating_period(masks: list) -> int:
+    if not masks:
+        return 1
+    n = len(masks)
+    for p in range(1, n + 1):
+        match = True
+        for i in range(n):
+            if masks[i] != masks[i % p]:
+                match = False
+                break
+        if match:
+            return p
+    return n
 
 def _compute_alt_range_resolutions(params, window_name: str = 'hann'):
     """
@@ -281,20 +478,123 @@ def _compute_alt_range_resolutions(params, window_name: str = 'hann'):
     return out
 
 
+def _merge_recorder_log(params, log_path):
+    """
+    Fold in the recorder's own log and let it decide the lane count.
+
+    The recorder's lane mode is the width of the container the samples land in, while
+    LaneConfig is how many lanes the radar drives. Only the first of those describes the
+    file on disk, so it wins: numLanes becomes the recorder's value and the radar's stays
+    available as numLanes_radar. When the recorder reserves more than the radar fills,
+    the surplus slots may stay empty, and a naive read treats them as samples - which
+    halves the range scale and adds a mirror image.
+    """
+    csv_path = find_raw_log_csv(log_path)
+    info = parse_raw_log_csv(csv_path)
+    if not info:
+        return
+    params.update(info)
+
+    dca_lanes = info.get("dca_lane_mode")
+    radar_lanes = params.get("numLanes")
+    params["numLanes_radar"] = radar_lanes
+
+    if dca_lanes in (1, 2, 4):
+        # The demux has to follow the recorder, not the radar. LaneConfig says how many
+        # lanes the radar drives; the recorder's lane mode is the width of the container
+        # the samples are actually written into, and that is what determines how the
+        # int16 stream has to be cut apart. Taking LaneConfig instead decodes the file
+        # into the wrong shape and, because the byte count still works out, it does so
+        # without raising anything.
+        if radar_lanes and int(dca_lanes) != int(radar_lanes):
+            params["lane_mode_mismatch"] = True
+            print(f"[parse_logfile_full] NOTE: the radar drives {radar_lanes} LVDS "
+                  f"lane(s) (LaneConfig) but the recorder ran in {dca_lanes}-lane mode. "
+                  f"Decoding with {dca_lanes} lanes, which is the container the samples "
+                  f"were written into. Any slots the radar left unfilled are dropped on "
+                  f"load when they are systematically zero.")
+        params["numLanes"] = int(dca_lanes)
+        params["numLanes_source"] = "DCA1000 recorder log"
+    elif dca_lanes:
+        print(f"[parse_logfile_full] NOTE: the recorder log reports an unusable lane "
+              f"mode ({dca_lanes}); keeping {radar_lanes} from the radar configuration.")
+
+    # The capture's wall clock, which is what a reference recording has to be lined up
+    # against. The API log only says when the session's first command was issued, and
+    # because mmWave Studio appends every capture to the same log that can be many
+    # minutes before the data starts - on the vitals set here, between 37 s and 28 min.
+    cap_start = info.get("dca_capture_start_timestamp")
+    if cap_start:
+        log_start = params.get("radar_start_timestamp")
+        params["radar_start_timestamp_log"] = log_start
+        if log_start is not None:
+            drift = cap_start - float(log_start)
+            if abs(drift) > 2.0:
+                params["capture_start_vs_log_s"] = drift
+                print(f"[parse_logfile_full] NOTE: the API log's first timestamp is "
+                      f"{drift:+.0f} s from the recorder's capture start. Using the "
+                      f"recorder's {info['dca_capture_start']}; syncing a reference "
+                      f"recording against the log would have been off by that much.")
+        params["radar_start_timestamp"] = cap_start
+        params["radar_start_time"] = info["dca_capture_start"]
+        params["radar_start_source"] = "DCA1000 recorder log"
+
+    lost = info.get("dca_packets_zero_filled")
+    if lost:
+        pct = info.get("dca_packet_loss_pct")
+        pct_txt = f" ({pct:.1f} % of the stream)" if pct else ""
+        print(f"[parse_logfile_full] NOTE: the recorder zero-filled {lost} packets"
+              f"{pct_txt} and saw {info.get('dca_out_of_sequence', 0)} out of sequence.")
+
+
+def _fill_velocity_and_range_limits(p):
+    """
+    Doppler and range limits, once the frame configuration is known.
+
+    velocityRes_m_s used to be lambda / (2 * rampEndTime), which is neither the
+    resolution nor the maximum: it leaves out the number of Doppler bins and uses the
+    ramp time instead of the chirp repetition time. Both IWR6843 captures came out as
+    the same 62.2 m/s although one has 32 Doppler bins and the other 5, and the AWR1642
+    capture read 64.9 m/s where the real figure is 0.074 - a factor of 874.
+
+      Tc    = (idleTime + rampEndTime) * (number of TX in the TDM pattern)
+      v_max = lambda / (4 * Tc)
+      v_res = lambda / (2 * numLoops * Tc)
+
+    Range limits come from the beat frequency the sampling rate can still carry; real
+    sampling only resolves half the spectrum, so its maximum range is half.
+    """
+    try:
+        f_eff = p.get('effectiveStartFreqGHz') or p.get('startFreqGHz')
+        idle = p.get('idleTime_us')
+        ramp = p.get('rampEndTime_us')
+        slope = p.get('freqSlopeMHz_us')
+        fs_msps = p.get('digOutSampleRate_MHz')
+        if f_eff and idle is not None and ramp is not None:
+            lam = C_LIGHT / (float(f_eff) * 1e9)
+            if slope and fs_msps and p.get('numAdcSamples'):
+                # middle of the ADC window, as capture_params.wavelength_m (roadmap 1.9)
+                lam = C_LIGHT / (float(f_eff) * 1e9 + float(slope) * 1e12
+                                 * (int(p['numAdcSamples']) - 1) / (2.0 * float(fs_msps) * 1e6))
+            p['wavelength_mm'] = lam * 1000.0
+            n_tx = len(p.get('tx_order_masks') or []) or 1
+            tc = (float(idle) + float(ramp)) * 1e-6 * n_tx
+            loops = (p.get('frameConfig') or {}).get('numLoops') or 1
+            if tc > 0:
+                p['chirpRepetitionTime_us'] = tc * 1e6
+                p['maxVelocity_m_s'] = lam / (4.0 * tc)
+                p['velocityRes_m_s'] = lam / (2.0 * max(1, int(loops)) * tc)
+                p['dopplerBins'] = int(loops)
+        if slope and fs_msps:
+            r_max = (float(fs_msps) * 1e6) * C_LIGHT / (2.0 * float(slope) * 1e12)
+            is_real = 'REAL' in str(p.get('dataFmt_adcFmt', '')).upper()
+            p['maxRange_m'] = r_max / 2.0 if is_real else r_max
+            p['maxRange_note'] = 'real sampling: half spectrum' if is_real else 'complex sampling'
+    except Exception as exc:
+        print(f"[parse_logfile_full] Could not derive velocity/range limits: {exc}")
+
+
 def parse_logfile_full(log_path, print_summary=False):
-    # PRE-SCAN (FORWARD) to get chip hint before reverse reading
-    chip_hint = None
-    chip_hint_band = None
-    chip_line_pattern = re.compile(r'API:select_chip_version,([^,]+)', re.IGNORECASE)
-    with open(log_path, 'r') as f_scan:
-        for ln in f_scan:
-            m = chip_line_pattern.search(ln)
-            if m:
-                chip_hint = m.group(1).strip()
-                mapped = map_chip_to_band(chip_hint)
-                if mapped:
-                    chip_hint_band = mapped
-                    break # Found it, no need to scan further
     params = {}
     chirp_configs = []
     band = None
@@ -304,33 +604,77 @@ def parse_logfile_full(log_path, print_summary=False):
     adc_out_parsed = {} # NEW: Re-added to store for printing
     chirps_dict = {}
     frame_cfg = None
+    frame_cfg_line = None
     adv_frame_cfg = None
     lane_cfg_parsed = {} # NEW: for LaneConfig
     lvds_lane_cfg = {}   # NEW: for LvdsLaneConfig (fallback/confirmation)
 
     with open(log_path, 'r') as f:
         lines = f.readlines()
+
+    # Chip hint: scan the (already loaded) lines instead of opening and reading the
+    # whole log a second time. The pattern accepts both spellings that occur in real
+    # mmWave Studio logs - select_chip_version and SelectChipVersion - and always
+    # keeps the text as logged, so a variant suffix such as "AOP" survives. Losing it
+    # here made AOA._get_antenna_geometry() fall back to guessing the antenna layout.
+    chip_hint = None
+    chip_hint_band = None
+    chip_line_pattern = re.compile(r'API:\s*Select_?Chip_?Version\s*,\s*([^,\r\n]+)', re.IGNORECASE)
+    for ln in lines:
+        m = chip_line_pattern.search(ln)
+        if m:
+            candidate = m.group(1).strip()
+            if not candidate:
+                continue
+            chip_hint = candidate
+            mapped = map_chip_to_band(chip_hint)
+            if mapped:
+                chip_hint_band = mapped
+                break  # first fully resolved hint wins
+    if chip_hint and not chip_hint_band:
+        print(f"[parse_logfile_full] WARNING: chip '{chip_hint}' not recognised by "
+              f"map_chip_to_band(); band will be guessed from the start frequency.")
+
+    # The first timestamp in the API log is when the session's first command was
+    # issued, not when the capture began - mmWave Studio keeps appending to one log,
+    # so on a log covering several captures this can be tens of minutes early. It is
+    # only a fallback; _merge_recorder_log replaces it with the recorder's own capture
+    # start when the CSV is there. Kept apart from the selected profile's timestamp.
+    log_timestamps = []
+    for raw_line in lines:
+        match = ts_re.match(raw_line.strip())
+        if match:
+            try:
+                log_timestamps.append(datetime.strptime(match.group(1), "%d-%b-%Y %H:%M:%S"))
+            except ValueError:
+                pass
+    if log_timestamps:
+        radar_start_dt = min(log_timestamps)
+        params['radar_start_timestamp'] = radar_start_dt.timestamp()
+        params['radar_start_time'] = radar_start_dt.strftime("%d-%m-%Y %H:%M:%S")
+        params['radar_start_source'] = "API log (first command)"
+    params['log_path'] = log_path
+
     lines = reversed(lines)
     for line in lines:
         line_stripped = line.strip()
         m_ts = ts_re.match(line_stripped)
         current_ts_str = m_ts.group(1) if m_ts else None
 
-        # This is now a fallback if pre-scan fails.
-        if ('API:select_chip_version' in line or 'API:SelectChipVersion' in line) and not chip_hint_band:
-            # Only update if pre-scan failed
-            if 'AR1642' in line or 'AWR1642' in line:
-                chip_hint = 'AR1642'
+        # Fallback if the scan above found no usable chip line: derive only the BAND
+        # from the raw line and never overwrite chip_hint with a generic literal.
+        # Doing so used to discard variant suffixes (e.g. the "AOP" in IWR6843AOP),
+        # which downstream decides the antenna geometry from.
+        if ('select_chip_version' in line.lower() or 'selectchipversion' in line.lower()) and not chip_hint_band:
+            line_up = line.upper()
+            if 'AR1642' in line_up or 'AWR1642' in line_up:
                 chip_hint_band = '77'
-            elif 'IWR6843' in line or 'AWR6843' in line:
-                chip_hint = 'IWR6843'
+            elif 'IWR6843' in line_up or 'AWR6843' in line_up:
                 chip_hint_band = '60'
-        if 'API:ProfileConfig' in line:
-            try:
-                payload = line.split('API:ProfileConfig,', 1)[1]
-            except IndexError:
+        if 'API:ProfileConfig' in line or 'ar1.ProfileConfig' in line:
+            tokens = extract_tokens(line, 'API:ProfileConfig,', 'ar1.ProfileConfig')
+            if not tokens:
                 continue
-            tokens = [t for t in payload.strip().split(',') if t != '']
             raw_int = []
             for t in tokens:
                 try:
@@ -405,10 +749,11 @@ def parse_logfile_full(log_path, print_summary=False):
                 p['stopFreqGHz'] = None
                 p['rangeRes_m'] = None
                 p['rangeRes_cm'] = None
-            if p.get('startFreqGHz') and p.get('rampEndTime_us'):
-                p['velocityRes_m_s'] = 3e8 / (2 * p['startFreqGHz'] * 1e9 * (p['rampEndTime_us'] * 1e-6)) if p['rampEndTime_us'] else None
-            else:
-                p['velocityRes_m_s'] = None
+            # Velocity limits are filled in after the frame configuration is known -
+            # they depend on the chirp repetition time and the number of Doppler bins,
+            # neither of which lives in ProfileConfig.
+            p['velocityRes_m_s'] = None
+            p['maxVelocity_m_s'] = None
             p['digOutSampleRate_MHz'] = p['digOutSampleRate'] / 1000.0 if p.get('digOutSampleRate') else None
             p['timestamp'] = current_ts_str
             try:
@@ -493,15 +838,13 @@ def parse_logfile_full(log_path, print_summary=False):
                     adc_out_parsed['timestamp'] = current_ts_str # Store timestamp
             except (IndexError, ValueError):
                 pass
-        elif 'API:ChirpConfig' in line:
+        elif 'API:ChirpConfig' in line or 'ar1.ChirpConfig' in line:
             # NEW: full chirp parsing (with txActive)
-            try:
-                payload = line.split('API:ChirpConfig,', 1)[1]
-            except IndexError:
+            tokens = extract_tokens(line, 'API:ChirpConfig,', 'ar1.ChirpConfig')
+            if not tokens:
                 continue
-            nums = [tok for tok in payload.strip().split(',') if tok != '']
             ints = []
-            for t in nums:
+            for t in tokens:
                 try:
                     ints.append(int(t))
                 except ValueError:
@@ -527,12 +870,13 @@ def parse_logfile_full(log_path, print_summary=False):
             # Keep startIdx list for legacy txEnable string
             if ints and ints[0] is not None:
                 chirp_configs.append(str(ints[0]))
-        elif 'API:FrameConfig' in line and frame_cfg is None:
+        elif ('API:FrameConfig' in line or 'ar1.FrameConfig' in line) and frame_cfg is None:
             fc = parse_frame_config_line(line)
             if fc:
                 fc['timestamp'] = current_ts_str
                 frame_cfg = fc
-        elif 'API:AdvancedFrameConfig' in line and adv_frame_cfg is None:
+                frame_cfg_line = line
+        elif ('API:AdvancedFrameConfig' in line or 'ar1.AdvancedFrameConfig' in line) and adv_frame_cfg is None:
             afc = parse_advanced_frame_config_line(line)
             if afc:
                 afc['timestamp'] = current_ts_str
@@ -654,12 +998,39 @@ def parse_logfile_full(log_path, print_summary=False):
 
     if frame_cfg:
         params['frameConfig'] = frame_cfg
+        # NEW: extract periodicity for easier access in other modules
+        if 'framePeriodicity_ms' in frame_cfg:
+            params['framePeriodicity_ms_selected'] = frame_cfg['framePeriodicity_ms']
     if adv_frame_cfg:
         params['advancedFrameConfig'] = adv_frame_cfg
+        # NEW: extract first subframe periodicity as default for Advanced Frame
+        if 'adv_periodicity_1_us' in adv_frame_cfg:
+            params['framePeriodicity_ms_selected'] = adv_frame_cfg['adv_periodicity_1_us'] / 1000.0
 
     chirps_list = list(chirps_dict.values())
     chirps_list.sort(key=lambda c: (c["chirpStartIdx"], c["chirpEndIdx"]))
     params['chirps'] = chirps_list
+
+    # The FrameConfig field layout is ambiguous on its own, so resolve it now that the
+    # chirps defined by ChirpConfig are known - the frame can only use those.
+    if frame_cfg_line is not None:
+        chirp_ranges = [(c.get('chirpStartIdx'), c.get('chirpEndIdx')) for c in chirps_list
+                        if isinstance(c.get('chirpStartIdx'), int) and isinstance(c.get('chirpEndIdx'), int)]
+        resolved = parse_frame_config_line(frame_cfg_line, chirp_ranges=chirp_ranges)
+        if resolved:
+            resolved['timestamp'] = (frame_cfg or {}).get('timestamp')
+            if frame_cfg and (resolved['chirpStartIdx'], resolved['chirpEndIdx']) != \
+                    (frame_cfg.get('chirpStartIdx'), frame_cfg.get('chirpEndIdx')):
+                print(f"[parse_logfile_full] FrameConfig re-read against the defined chirps: "
+                      f"chirps {resolved['chirpStartIdx']}..{resolved['chirpEndIdx']}, "
+                      f"{resolved['numLoops']} loops, {resolved['numFrames']} frames.")
+            frame_cfg = resolved
+            # The re-read layout has to reach params too. It used to stay in this local
+            # only: the TX order below followed it while derive_capture_dimensions kept the
+            # first guess, which takes layout A whenever numFrames is small. vitals/data_test4
+            # (50 frames) came out as 512 frames of chirps 0..50, and a short TDM recording
+            # with chirps 0..1 as one chirp per loop - a cube of the wrong shape.
+            params['frameConfig'] = frame_cfg
     params['txEnable'] = ' '.join(chirp_configs)
 
     # NEW: derive TX order (pattern) directly from ChirpConfig ranges (expanded in defined order)
@@ -669,28 +1040,67 @@ def parse_logfile_full(log_path, print_summary=False):
         positions_by_mask = {}  # mask(int) -> [indices]
         positions_by_name = {}  # "TX0" -> [indices]
         pos = 0
-        for ch in chirps_list:
-            s = ch.get('chirpStartIdx')
-            e = ch.get('chirpEndIdx')
-            m = int(ch.get('txEnable') or 0)
-            if isinstance(s, int) and isinstance(e, int) and e >= s:
-                n = e - s + 1
-            else:
-                n = 0
-            if n > 0:
-                name = decode_tx_enable(m)
-                for _ in range(n):
-                    tx_order_masks.append(m)
-                    tx_order_names.append(name)
-                    if m != 0:
-                        positions_by_mask.setdefault(m, []).append(pos)
-                        positions_by_name.setdefault(name, []).append(pos)
-                    pos += 1
 
-        # Effective unique chirps from definitions (not FrameConfig!)
-        eff_unique = _sum_defined_unique_chirps(chirps_list)
-        if eff_unique > 0:
+        # Check if we can get active range from frame_cfg or adv_frame_cfg
+        start_idx = None
+        end_idx = None
+        if frame_cfg:
+            start_idx = frame_cfg.get('chirpStartIdx')
+            end_idx = frame_cfg.get('chirpEndIdx')
+
+        if start_idx is not None and end_idx is not None:
+            # We construct tx_order_masks for this range!
+            for c_idx in range(start_idx, end_idx + 1):
+                # Find matching chirp in chirps_list
+                match_chirp = None
+                for ch in chirps_list:
+                    s = ch.get('chirpStartIdx')
+                    e = ch.get('chirpEndIdx')
+                    if s is not None and e is not None and s <= c_idx <= e:
+                        match_chirp = ch
+                        break
+                
+                # If found, use its txEnable. Otherwise, default mask based on index (e.g. 1 << (c_idx % 3))
+                if match_chirp is not None:
+                    m = int(match_chirp.get('txEnable') or 0)
+                else:
+                    # Fallback mask: 1 << (c_idx % 3)
+                    m = 1 << (c_idx % 3)
+                
+                name = decode_tx_enable(m)
+                tx_order_masks.append(m)
+                tx_order_names.append(name)
+                if m != 0:
+                    positions_by_mask.setdefault(m, []).append(pos)
+                    positions_by_name.setdefault(name, []).append(pos)
+                pos += 1
+            
+            eff_unique = find_repeating_period(tx_order_masks)
+            params['unique_chirps_frame'] = eff_unique
             params['uniqueChirps_effective'] = eff_unique
+        else:
+            for ch in chirps_list:
+                s = ch.get('chirpStartIdx')
+                e = ch.get('chirpEndIdx')
+                m = int(ch.get('txEnable') or 0)
+                if isinstance(s, int) and isinstance(e, int) and e >= s:
+                    n = e - s + 1
+                else:
+                    n = 0
+                if n > 0:
+                    name = decode_tx_enable(m)
+                    for _ in range(n):
+                        tx_order_masks.append(m)
+                        tx_order_names.append(name)
+                        if m != 0:
+                            positions_by_mask.setdefault(m, []).append(pos)
+                            positions_by_name.setdefault(name, []).append(pos)
+                        pos += 1
+            
+            eff_unique = find_repeating_period(tx_order_masks)
+            if eff_unique > 0:
+                params['uniqueChirps_effective'] = eff_unique
+                params['unique_chirps_frame'] = eff_unique
 
         # Frame vs effective mismatch flag (for GUI diagnostics)
         fc = params.get('frameConfig') or {}
@@ -715,6 +1125,8 @@ def parse_logfile_full(log_path, print_summary=False):
     except Exception:
         pass
 
+    _fill_velocity_and_range_limits(params)
+
     # Add LaneConfig and LvdsLaneConfig info
     if lane_cfg_parsed:
         params.update(lane_cfg_parsed)
@@ -734,8 +1146,12 @@ def parse_logfile_full(log_path, print_summary=False):
         lanes_laneCfg = None
     lanes_lvdsCfg = lvds_lane_cfg.get('numLanes_from_lvdsLaneConfig') if lvds_lane_cfg else None
     if isinstance(lanes_laneCfg, int) and (1 <= lanes_laneCfg <= 4):
-        final_num_lanes = lanes_laneCfg
-        final_src = "LaneConfig"
+        # An LVDS container is 1, 2 or 4 lanes wide - there is no 3-lane mode. A mask
+        # with three bits set is carried in the next width up, the same way
+        # LvdsLaneConfig code 3 already means 4. Without this a LaneConfig of 7, 13 or
+        # 14 reached load_raw_cube as numLanes=3 and it refused to decode at all.
+        final_num_lanes = 4 if lanes_laneCfg == 3 else lanes_laneCfg
+        final_src = "LaneConfig" if final_num_lanes == lanes_laneCfg else "LaneConfig (3->4)"
     elif lanes_lvdsCfg in (1, 2, 4):
         final_num_lanes = lanes_lvdsCfg
         final_src = "LvdsLaneConfig"
@@ -743,6 +1159,9 @@ def parse_logfile_full(log_path, print_summary=False):
         final_src = "unknown"
     params['numLanes'] = final_num_lanes
     params['numLanes_source'] = final_src
+
+    # Needs numLanes, so it runs once the lane configuration is settled.
+    _merge_recorder_log(params, log_path)
 
     # NEW: compute alternative range resolution estimates
     params.update(_compute_alt_range_resolutions(params, window_name='hann'))
@@ -760,15 +1179,19 @@ def parse_logfile_full(log_path, print_summary=False):
             params['rangeBin_pow2_m'] = dR_eff_m * (N / float(NFFT_pow2))
             params['rangeBin_pow2_cm'] = params['rangeBin_pow2_m'] * 100.0
             params['rangeBin_NFFT_pow2'] = NFFT_pow2
-            # Convenience alias: what GUI typically shows as “Range Resolution”
-            params['rangeResolution_gui_cm'] = params['rangeBin_pow2_cm']
+            # Spacing between FFT bins after zero-padding. This is NOT the range
+            # resolution: zero-padding interpolates, it does not resolve. On the
+            # AWR1642 capture the bin spacing is 4.7 cm while the radar can only
+            # separate two targets 8.0 cm apart, so showing it as "resolution"
+            # overstates the radar by 1.7x.
+            params['rangeBinSpacing_gui_cm'] = params['rangeBin_pow2_cm']
         else:
             params['rangeBin_no_pad_m'] = None
             params['rangeBin_no_pad_cm'] = None
             params['rangeBin_pow2_m'] = None
             params['rangeBin_pow2_cm'] = None
             params['rangeBin_NFFT_pow2'] = None
-            params['rangeResolution_gui_cm'] = None
+            params['rangeBinSpacing_gui_cm'] = None
     except Exception:
         pass
 
@@ -930,7 +1353,8 @@ def parse_logfile_full(log_path, print_summary=False):
         summary_lines.append(f"    bin_spacing (no zero-pad, NFFT=N={params.get('numAdcSamples')}): {params.get('rangeBin_no_pad_cm')} cm")
         summary_lines.append(f"    bin_spacing (zero-pad to NFFT={params.get('rangeBin_NFFT_pow2')}): {params.get('rangeBin_pow2_cm')} cm")
         # NEW: Explicit GUI number (alias)
-        summary_lines.append(f"    GUI Range Resolution: {params.get('rangeResolution_gui_cm')} cm")
+        summary_lines.append(f"    GUI bin spacing: {params.get('rangeBinSpacing_gui_cm')} cm "
+                             f"(interpolated; the resolution is physical_eff above)")
 
         # Chirps (extend with effective BW and effective start freq per‑chirp)
         chirps = params.get('chirps', [])
@@ -1023,12 +1447,20 @@ def parse_logfile_full(log_path, print_summary=False):
                                  f"(timestamp {params.get('lvdsLaneConfig_timestamp','N/A')})")
         else:
             summary_lines.append("  LvdsLaneConfig: not found")
+        dca_lane_mode = params.get('dca_lane_mode')
+        if dca_lane_mode:
+            summary_lines.append(f"  Recorder log: DCA1000 ran in {dca_lane_mode}-lane mode "
+                                 f"(radar drives {params.get('numLanes_radar')})")
+        else:
+            summary_lines.append("  Recorder log: not found")
         summary_lines.append(f"  numLanes (selected): {params.get('numLanes')}  [source={params.get('numLanes_source')}]")
         summary_lines.append(f"  Detected Lanes: {params.get('numLanes')}")
         summary_lines.append(f"  Lane Pattern: {params.get('lanesActive')}")
-        # UPDATED explanation: LaneConfig is a bitmask
-        summary_lines.append("  Inference rule: LaneConfig is a bitmask (1=lane1, 2=lane2, 3=lane1+2,…). "
-                             "numLanes = popcount(mask) in [1..4]; fallback LvdsLaneConfig (1/2/4; 3->4).")
+        # UPDATED explanation: the recorder owns the container width
+        summary_lines.append("  Inference rule: the recorder log's lane mode wins - it is the width of the "
+                             "container the samples were written into. Without it, LaneConfig is a bitmask "
+                             "(1=lane1, 2=lane2, 3=lane1+2,…) and numLanes = popcount(mask), with 3 lanes "
+                             "carried in a 4-lane container; fallback LvdsLaneConfig (1/2/4; 3->4).")
 
         # NEW: Chirp TX pattern summary
         try:

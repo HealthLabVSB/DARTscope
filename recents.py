@@ -12,9 +12,12 @@ try:
 except Exception:
     user_config_dir = None  # fallback
 
+DEFAULT_LIMIT = 20   # entries kept in the history
+
 
 class RecentFilesManager:
-    def __init__(self, app_name: str = "bme_radar_gui", limit: int = 5, filename: str = "recent_gui.json"):
+    def __init__(self, app_name: str = "bme_radar_gui", limit: int = DEFAULT_LIMIT,
+                 filename: str = "recent_gui.json"):
         self.limit = max(1, int(limit))
         if user_config_dir:
             cfgdir = Path(user_config_dir(app_name, appauthor=False))
@@ -79,6 +82,7 @@ def tk_pick_recent_and_open(parent=None, on_open=None):
     try:
         import tkinter as tk
         from tkinter import messagebox
+        import theme
     except Exception:
         return None
 
@@ -93,7 +97,8 @@ def tk_pick_recent_and_open(parent=None, on_open=None):
 
     win = tk.Toplevel(parent) if parent else tk.Tk()
     win.title("Recently opened files")
-    win.geometry("720x240")
+    win.geometry(f"{theme.px(720)}x{theme.px(420)}")
+    win.selected_path = None
     lb = tk.Listbox(win)
     lb.pack(fill="both", expand=True)
     for p in recents:
@@ -104,14 +109,13 @@ def tk_pick_recent_and_open(parent=None, on_open=None):
         if not sel:
             return
         path = lb.get(sel[0])
+        win.selected_path = path
         try:
             win.destroy()
         except Exception:
             pass
         if callable(on_open):
             on_open(path)
-        else:
-            win.selected_path = path
 
     lb.bind("<Double-Button-1>", _choose)
     lb.bind("<Return>", _choose)
@@ -121,5 +125,13 @@ def tk_pick_recent_and_open(parent=None, on_open=None):
     tk.Button(btn_frame, text="Open", command=_choose).pack(side="right")
     tk.Button(btn_frame, text="Close", command=win.destroy).pack(side="right", padx=(0, 6))
 
-    win.mainloop() if parent is None else None
+    # Block until the dialog closes, otherwise this returned immediately - before the
+    # user had clicked anything - and the caller always got None, which made the
+    # "Dialog..." recent-files button do nothing.
+    if parent is None:
+        win.mainloop()
+    else:
+        win.transient(parent)
+        win.grab_set()
+        parent.wait_window(win)
     return getattr(win, "selected_path", None)

@@ -1,182 +1,123 @@
-# DARTscope v1.0
+# DARTscope 2.0
 
-A comprehensive, high-performance suite of tools for inspecting, processing, and visualizing TI mmWave radar data captured using the DCA1000 EVM. This project provides a full-featured GUI for detailed signal analysis and lightweight CLI scripts for quick visualization.
+Recording and analysis of TI mmWave radar data captured with the DCA1000EVM: a GUI that records
+with the radar (without mmWave Studio), checks a recording, and analyses it - range, velocity,
+angle, 4D imaging, people and their breathing and heart rate - plus command-line tools for
+batch work.
 
-## Quick Start Guide
+> **The user manual is [`docs/MANUAL.md`](docs/MANUAL.md)** - every tab, button and setting,
+> step-by-step workflows, exports and troubleshooting. The same text is the **Manual** tab of the
+> application, with a table of contents and search.
 
-### 1. Prerequisites
-- **Python 3.8+**
-- **Core Dependencies**: `numpy`, `matplotlib`, `scipy`, `tkinter`
-- **Video Export**: `ffmpeg` must be installed and available in your system PATH to export processing sequences as MP4.
+## Download and start (Windows)
 
-### 2. Launching the Application
-Run the main GUI:
+Run **`DARTscope.exe`** - from the [GitHub Release v2.0](https://github.com/HealthLabVSB/DARTscope/releases/tag/v2.0)
+or [`dist/DARTscope.exe`](dist/DARTscope.exe) in this repository. Nothing has to be installed. The
+program has no console window; everything it reports appears in its **Log** tab.
+
+- **Recording with the single-chip radar** (IWR6843AOPEVM + DCA1000, Measure tab): mmWave Studio
+  2.1.1 has to be installed - the radar's library and firmware come from it; it does not run.
+- **Recording with the cascade radar** (AWR2243-2X-CAS-EVM + DCA1000, Measure -> Cascade radar):
+  TI UniFlash 8.x or Code Composer Studio 20+ has to be installed - its debugger loads the
+  cascade's firmware over the board's USB (JTAG).
+- The first recording makes Windows ask whether DARTscope may use the network: allow it, for
+  public networks too (the DCA1000's network usually counts as one), or no data arrive.
+- Video export (MP4) additionally needs `ffmpeg` on the system PATH.
+
+## What is new in 2.0
+
+- **Measure tab - recording without mmWave Studio.** The IWR6843AOPEVM is booted and configured
+  through TI's RadarLinkDLL, the DCA1000 controlled over UDP; takes land in exactly the files
+  mmWave Studio writes. Settings in physical units with their checks, takes started by the
+  operator (button or space bar, countdown), a quick report after each take, and series over a
+  range of settings ranked for a kind of movement.
+- **Cascade radar.** The AWR2243-2X-CAS-EVM (2x AWR2243 + AM2732R; 6 TX, 8 RX - up to 48 virtual
+  channels): presets, every setting checked against the radar, the firmware and the DCA1000
+  link, antenna calibration (corner reflector or autofocus), and its takes decoded like any other.
+  On macOS and Windows.
+- **Fastcheck tab.** One pass over a whole recording: lost packets, clipping, the receivers, glitches,
+  the RTI and the energy in the breathing and heart bands, with a verdict.
+- **Vital signs.** Breathing and heart rate in three independent views (Vitals, HR, AI), the heart
+  from several range bins, a moving person's heart rate, comparison with a reference (PPG and pulse
+  of a somnograph); **Multi Vitals** finds several people and gives each one's rates.
+- **Imaging.** A 4D point cloud of every frame (range, velocity, azimuth, elevation), objects,
+  tracks and the people among them.
+- **Micro-Doppler** measures swings of legs and arms and their maximum speed.
+- **Playback** through a recording at its real speed, all views following one frame slider; a
+  **capture health report** of every recording; the **Log** tab with everything the program reports.
+- Windows: sharp at any display scaling, the window fitted to the screen, long recordings
+  analysed several times faster, and the status bar shows how long a computation has run and
+  about how long it will still take.
+
+## Running from source
+
+Python 3.10 or newer (tkinter comes with Python on Windows and macOS; `python3-tk` on Linux):
+
 ```bash
+pip install -r requirements.txt
 python DCA_processing.py
 ```
 
-### 3. Step-by-Step Data Loading
-1. **Open BIN**: Click the "Open BIN" button and select your raw ADC data file (e.g., `adc_data_Raw_0.bin`).
-2. **Log Discovery**: The app automatically searches for the corresponding `_LogFile.txt` in the same directory. This log is crucial as it contains all hardware parameters (sampling rate, slope, chirps, lanes).
-3. **Decode & Load**: Click "Decode & Load".
-    - The **Parameter View** will populate with grouped hardware settings (Profile, Chirp, Frame, Data Format).
-    - The raw data is demultiplexed and reshaped into a 4D Radar Cube: `[Frames, Chirps, RX, Samples]`.
-4. **Global Controls**: Once loaded, use the **Global Frame** slider at the top to navigate through the capture. Use the **Antenna** selector to choose between MRC (Maximum Ratio Combining), SUM, or individual RX channels.
+- **Recording on macOS / Linux**: `pip install pyserial pyftdi` and libusb (`brew install libusb`
+  on macOS); the radar firmware comes from mmWave Studio 2.1.1 installed in a Wine bottle
+  (Whisky, CrossOver) or from `$DARTSCOPE_STUDIO_DIR`. The radar is driven over the DCA1000's USB
+  without TI's Windows DLL.
+- The Measure tab alone: `python -m acquisition gui`; the cascade alone: `python cascade_gui.py`.
 
----
+## Building DARTscope.exe
 
-## Codebase Structure
+In a clean virtual environment - not Anaconda, whose MKL-based numpy makes a 300 MB exe:
 
-The toolbox is organized into functional modules to separate hardware-specific decoding from high-level signal processing and UI management.
+```bat
+python -m venv .buildenv
+.buildenv\Scripts\python -m pip install -r requirements-build.txt
+.buildenv\Scripts\python -m PyInstaller DARTscope.spec --noconfirm --clean
+```
+
+The exe appears in `dist\`. It carries the 32-bit Python in [`.py32/`](.py32) (python.org's
+3.12.10 embeddable package, 32-bit, unchanged), which runs `acquisition/radarlink_host.py` to load
+TI's 32-bit RadarLinkDLL, and the cascade's firmware, JTAG script and target configuration
+(`cascade/`). To check a build: `set DARTSCOPE_SELFTEST=report.json` and start the exe - it writes
+what it finds (its parts, the radar's library, the boards plugged in) and closes.
+
+## Command-line tools
+
+From the repository folder, `python -m <tool> --help` for the options; described in chapter 11
+of the manual.
+
+| Tool | What it does |
+|:---|:---|
+| `python -m acquisition` | record (`capture`), series of settings (`series`), checks (`check`, `verify`) and the Measure window (`gui`) |
+| `python -m tools.health_report` | the capture health report of one or many recordings |
+| `python -m tools.decode_check` | decodes every recording of a folder and compares the results |
+| `python -m tools.pair_reference` | which somnograph session covers which radar recording, and the offset |
+| `python -m tools.vitals_check` | the Vitals view against a somnograph on every covered recording |
+| `python -m tools.vital_range_scan` | finds the range of a breathing person, rates per range bin |
+| `python -m tools.heart_rate` | the heart rate of a person who may be moving |
+| `python -m tools.limb_speed` | swings of legs and arms and their maximum speed |
+| `python -m tools.calibrate` | antenna calibration from a corner reflector and its check |
+| `python -m tools.cascade_protocol` | verification of the cascade's presets from their own takes ([`docs/CASCADE_PROTOCOL.md`](docs/CASCADE_PROTOCOL.md)) |
+
+## Repository structure
 
 | Module | Responsibility |
 |:---|:---|
-| **`DCA_processing.py`** | Main entry point. Manages the multi-tabbed Tkinter GUI, global state, playback synchronization, and integrates all processing modules. |
-| **`dca1000_decode.py`** | Robust parser for mmWave Studio logs. Derives physical parameters (Slope, $f_{start}$, $B_{eff}$, $dR$) and determines LVDS lane/format settings. |
-| **`radar_processing.py`** | Core signal engine. Implements the LVDS demultiplexer, 4D Radar Cube construction, Range FFT, and Range-Doppler Map generation. |
-| **`AOA.py`** | Spatial processing suite. Handles virtual antenna array geometry (MIMO), phase/amplitude calibration, and 1D/2D Beamforming (Bartlett/Capon). |
-| **`detection.py`** | Target detection algorithms. Implements 2D CA-CFAR and OS-CFAR for Range-Doppler maps, along with clustering and peak extraction. |
-| **`gui_helper.py`** | Backend for the "Radar Design Helper". Contains the logic for the radar experiment calculator and mmWave Studio command generator. |
-| **`range_fft.py`**, **`rti.py`**, **`range_profile.py`** | Modular, reusable components for specific Range-domain visualizations. |
-| **`recents.py`** | Utility for managing the "Recently Opened Files" history in a JSON-backed persistent store. |
-| **`rd_viz_min_GUI.py`** / **`rd_viz_min.py`** | Lightweight, standalone visualizer for quick data checks without the full processing suite. |
+| **`DCA_processing.py`** | Main entry point: the tabbed Tkinter GUI, global state, playback, and all views. |
+| **`dca1000_decode.py`**, **`capture_params.py`** | Parser of mmWave Studio logs; the physical parameters (slope, start frequency, bandwidth, resolution, wavelength) and the LVDS lane/format settings. |
+| **`radar_processing.py`** | Core signal engine: LVDS demultiplexer, 4D radar cube, range FFT, Range-Doppler maps. |
+| **`capture_health.py`**, **`fastcheck.py`**, **`fastcheck_gui.py`** | Health report and the Fastcheck tab. |
+| **`AOA.py`**, **`antenna_config.py`**, **`calibration.py`** | Virtual antenna arrays (MIMO), their layouts, calibration, beamforming (Bartlett, Capon). |
+| **`detection.py`**, **`clutter.py`**, **`velocity.py`**, **`spectral.py`** | CFAR detection, clutter suppression, velocities beyond the unambiguous limit, sub-bin peak interpolation. |
+| **`vitalsigns.py`**, **`hr_analysis.py`**, **`hr_gui.py`**, **`ai_vital_*.py`**, **`moving_hr*.py`**, **`vital_bands.py`** | Breathing and heart rate (Vitals, HR, AI views, moving person). |
+| **`multi_vitals*.py`**, **`radar_imaging*.py`**, **`limb_motion.py`** | Multi Vitals, Imaging, Micro-Doppler. |
+| **`acquisition/`**, **`measure_gui.py`** | Recording without mmWave Studio and the Measure tab. |
+| **`cascade/`**, **`cascade_gui.py`** | The AWR2243 cascade: settings, JTAG ([`cascade/firmware`](cascade/firmware) - TI's SDK cascade test with runtime settings), takes, calibration. |
+| **`gui_helper.py`**, **`chirp_design.py`** | The Helper tab: radar configuration calculator. |
+| **`theme.py`**, **`flow_layout.py`**, **`plot_interactivity.py`**, **`frame_cache.py`**, **`frame_marker.py`**, **`playback.py`**, **`log_view.py`**, **`manual*.py`** | Look, layout, plots, playback, Log and Manual tabs. |
+| **`tools/`** | The command-line tools above. |
 
+## Processing chain
 
----
-
-## Technical Pipeline Deep Dive
-
-### 1. Data Ingestion & Parameter Normalization
-The pipeline starts by synchronizing a raw `.bin` file with its mmWave Studio `_LogFile.txt`. 
-- **Log Parsing**: The system extracts raw API constants and converts them to SI units using chip-specific LSB factors (e.g., $3.6 \times 2^{-26}$ for 77GHz start frequency).
-- **Physical Derivation**: 
-  - Effective Bandwidth ($B_{eff}$): $Slope \times ADC\_Samples / F_{sampling}$
-  - Range Resolution ($dR$): $c / (2 \times B_{eff})$
-  - Max Velocity ($v_{max}$): $\lambda / (4 \times T_{chirp})$
-
-### 2. LVDS Decoding (Demux)
-Raw DCA1000 data is a serialized stream of `int16` values from multiple LVDS lanes.
-- **Lane Reordering**: Corrects hardware wiring (Lane Swap $1 \leftrightarrow 2$).
-- **Demultiplexing**: Reconstructs the interleaved stream based on the format (Complex1x, Complex2x, or Real).
-- **IQ Reconstruction**: Handles $I+jQ$ or $Q+jI$ (IQ Swap) based on the `iqOrder` flag.
-- **Result**: A 4D Radar Cube $\mathcal{X} \in \mathbb{C}^{F \times C \times RX \times N_s}$.
-
-### 3. Range Processing (Fast-Time FFT)
-Executed per chirp to transform time-domain samples into range bins.
-$$R(k) = \text{FFT}(\text{Window} \cdot (x(n) - \bar{x}))$$
-- **DC Removal**: Crucial for eliminating static leakage before windowing.
-- **Full Spectrum Handling**: For Complex1X, the pipeline maintains the full complex bandwidth to avoid aliasing and mirroring.
-
-### 4. Doppler Processing (Slow-Time FFT)
-Transforms the sequence of chirps into velocity information.
-- **TDM-MIMO Demux**: If multiple TX antennas are used in time-division, the system separates them into virtual channels.
-- **Static Clutter Removal**: Subtracts the mean of the slow-time signal to suppress stationary reflections (trees, walls).
-- **2D FFT**: A second FFT across the "chirp" dimension produces the Range-Doppler Map (RDM).
-
-### 5. Spatial Processing (AoA)
-Determines the angle of targets relative to the radar.
-- **Virtual Array Formation**: Combines $N_{TX} \times N_{RX}$ physical channels into a virtual Uniform Linear Array (ULA) or 2D grid (for IWR6843AOP).
-- **Beamforming (Bartlett)**:
-  $$P(\theta) = | \mathbf{a}(\theta)^H \mathbf{x} |^2$$
-  where $\mathbf{a}(\theta)$ is the steering vector for angle $\theta$.
-- **Calibration**: Multiplies virtual channels by complex coefficients (`antPhaseRot`) to correct for phase offsets.
-
----
-
-## Detailed Module Breakdown
-
-### Data Decoding & Parameters (Tab: Decode)
-- **Log Parsing**: Extracts `ProfileConfig`, `ChirpConfig`, and `FrameConfig` from mmWave Studio logs.
-- **LVDS Demux**: Supports 1, 2, or 4 lanes. Automatically handles IQ/QI order and interleaved/non-interleaved formats based on the log hints.
-- **Lane Swap**: Provides a toggle for `1 <-> 2` lane swapping to fix potential hardware wiring artifacts.
-
-### Range Analysis (Tab: Range FFT / RTI / Profile)
-- **Range FFT**: Converts fast-time ADC samples to range bins using a Hann window and DC removal.
-    - *Full Spectrum*: Toggle to see the full complex bandwidth.
-    - *Stationary Removal*: Adaptive background subtraction to highlight moving targets.
-- **RTI (Range-Time Intensity)**: Visualizes target movement over the entire capture duration.
-    - *Processing*: Stacks Range FFTs of all chirps/frames, applies a DC/edge notch filter.
-- **Range Profile (dBFS)**: Accurate power estimation relative to the ADC Full Scale. Supports coherent averaging across chirps for better SNR.
-
-### Velocity & Movement (Tab: Range-Doppler / Micro-Doppler)
-- **Range-Doppler Map (RDM)**: Computes 2D FFT (Fast-time + Slow-time).
-    - *TDM-MIMO*: Separates chirps by TX mask to reconstruct virtual antenna arrays.
-    - *Clutter Removal*: Subtraction of mean slow-time signal to eliminate static reflections.
-    - *Doppler Windowing*: Optional Hann/Hamming windows to reduce velocity side-lobes.
-- **Micro-Doppler (MD)**: Analyzes fine vibrations and rotations.
-    - *Processing*: Extracts Doppler spectra over time for specific range bins (e.g., detecting gait or fan rotation).
-
-### Spatial Analysis (Tab: AoA / 2D AoA)
-- **Angle-of-Arrival (AoA)**: 1D Azimuth beamforming.
-    - *MIMO Expansion*: Automatically forms a virtual ULA (Uniform Linear Array) from physical RX and TDM-TX positions.
-    - *Methods*: Bartlett (standard) or Capon (high-resolution) beamforming.
-- **2D RA/AE Maps**: Range-Azimuth and Azimuth-Elevation heatmaps.
-    - *Calibration*: Applies `antPhaseRot` and `compRangeBiasAndRxChanPhase` parameters from the log for accurate spatial mapping.
-
-### Biometrics (Tab: 1D View)
-- **Breath & Heart Rate**: Dedicated temporal FFT analysis for a single range bin.
-    - *Frequency Separation*: Categorizes energy into Noise/DC, Breathing (0.1–0.6 Hz), and Heart Rate (0.8–3.5 Hz).
-    - *Peak Tracking*: Automatically estimates BPM (Beats Per Minute) for physiological monitoring.
-
-### Detection (Tab: CFAR)
-- **2D CA-CFAR**: Constant False Alarm Rate detector.
-    - *Parameters*: Adjustable Guard and Training cell sizes.
-    - *Thresholding*: Adaptive threshold based on local noise estimation (Average or Ordered Statistic).
-    - *Clustering*: Groups detected pixels into targets and extracts physical Range/Velocity coordinates.
-
----
-
-### Target Detection & Analysis
-
-#### 2D CA-CFAR (Cell-Averaging Constant False Alarm Rate)
-To distinguish targets from noise, the system implements an adaptive threshold detector:
-1. **Windowing**: A sliding window of size $(2 \cdot T + 2 \cdot G + 1)$ is centered on the Cell Under Test (CUT).
-2. **Exclusion**: $G$ guard cells are excluded to prevent target energy from leaking into the noise estimate.
-3. **Estimation**: Noise level $P_{noise}$ is calculated as the average power in $T$ training cells.
-4. **Decision**: A detection is declared if $P_{CUT} > P_{noise} \cdot \alpha$, where $\alpha$ is the threshold factor.
-
-#### Biometric Extraction (Phase Analysis)
-For physiological monitoring, the system performs a temporal analysis on a stable range bin:
-1. **Unwrapping**: The phase of the complex Range-FFT peak is unwrapped to track displacement.
-2. **Filtering**: Band-pass filters separate the signal into Breathing (0.1–0.6 Hz) and Heart Rate (0.8–3.5 Hz).
-3. **Spectral Estimation**: An FFT is performed on the filtered phase signal to find the peak frequency, which is converted to BPM (Beats Per Minute).
-
----
-
-## Radar Design Helper (Tab: Helper)
-A built-in calculator to design your own radar experiments:
-- **Presets**: Quick settings for "Long Range (Macro)" or "Short Range (Respiration)".
-- **Constraints**: Automatically validates your goals (Range/Velocity resolution) against hardware limits (Bandwidth, ADC rate, Duty cycle).
-- **Command Generator**: Outputs a block of mmWave Studio commands ready to be used for sensor configuration.
-
----
-
-## Export Capabilities
-Every visualization card features an **Export** button:
-- **Current frame**: Save the current plot as a high-resolution **PNG**.
-- **Data**: Export the raw processed matrix (e.g., RDM or AoA spectrum) as **CSV**.
-- **All frames**: Render the entire capture as an **MP4 video** (requires ffmpeg).
-
-## Advanced Features & Troubleshooting
-
-### Lane Swapping & IQ Order
-Different TI hardware revisions (AOP vs. non-AOP) might have different lane assignments or IQ orderings.
-- If your Range FFT looks like a mirrored image or contains heavy noise, try toggling **Lane Swap (1<->2)** or checking the **IQ Swap** settings in the Decode tab.
-- The **Antenna Combine** mode (MRC vs SUM) can significantly impact SNR; MRC is generally preferred for non-coherent targets.
-
-### Processing Performance
-Processing large `.bin` files (multiple GBs) can be memory-intensive.
-- The app uses `numpy` memory mapping and efficient reshaping, but ensure you have enough RAM for the full 4D cube.
-- Use the **Minimal Visualizer** (`rd_viz_min_GUI.py`) if you only need a quick RDM check without loading the full suite.
-
-### Video Export Requirements
-Video export is powered by `matplotlib.animation`.
-- Ensure `ffmpeg` is in your PATH. You can verify this by running `ffmpeg -version` in your terminal.
-- Rendering can take some time depending on the number of frames and the complexity of the plot.
-
----
-
-## Processing Chain Architecture
 ```mermaid
 graph TD
     A[.bin + .txt Log] --> B(LVDS Decoding)
@@ -184,27 +125,33 @@ graph TD
     C --> D(Range FFT)
     D --> E(MIMO Reconstruction)
     E --> F(Doppler FFT)
-    F --> G(RDM / CFAR / MD)
+    F --> G(RDM / CFAR / Micro-Doppler / Imaging)
     E --> H(Spatial Beamforming)
-    H --> I(AoA / RA Map)
-    D --> J(RTI / Biometrics)
+    H --> I(AoA / Range-Angle / Movement)
+    D --> J(RTI / Vital signs / Multi Vitals)
 ```
 
+- **Range** (fast time): DC removal, Hann window, FFT - the full complex spectrum for Complex1X.
+- **Doppler** (slow time): TDM-MIMO demultiplexing into virtual channels, clutter suppression,
+  a second FFT across the chirps.
+- **Angle**: the virtual array of TX x RX channels, calibrated, beamformed (Bartlett or Capon).
+- **Vital signs**: the unwrapped phase of the chest's range bin, separated into breathing and
+  heart bands, rates from their spectra and tracked over time.
+
+## License and citation
+
+MIT - see [`LICENSE`](LICENSE). If you use DARTscope in your research or work, please cite it
+([`CITATION.cff`](CITATION.cff)).
+
+Third-party parts: the cascade firmware is built from TI's mmWave MCU+ SDK test code (BSD-3-Clause,
+Texas Instruments - [`cascade/firmware`](cascade/firmware)); [`.py32/`](.py32) is python.org's
+Python (PSF License, its `LICENSE.txt`); the exe bundles numpy, scipy, matplotlib, scikit-learn
+and Pillow under their licenses.
+
 ## Authors
+
 **Daniel Barvík** [ORCID: 0000-0001-7699-8792](https://orcid.org/0000-0001-7699-8792)
 
 **Dan Hrubý** [ORCID: 0009-0009-7109-9734](https://orcid.org/0009-0009-7109-9734)
 
 *Part of the [HEALTH.Lab](https://www.fei.vsb.cz/450/en/science-and-research/labs/HEALTHlab/) research.*
-
----
-
-## License
-
-DARTscope is released under the [MIT License](LICENSE) — free to use, modify, and distribute.
-
-If you use DARTscope in your research or work, please reference it as:
-
-> Daniel Barvík, Dan Hrubý. *DARTscope* (2025). GitHub: https://github.com/HealthLabVSB/DARTscope
-
-A machine-readable citation is available in [CITATION.cff](CITATION.cff). 

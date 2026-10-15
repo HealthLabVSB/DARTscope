@@ -1,0 +1,29 @@
+# DARTscope - runtime dependencies
+#
+#   pip install -r requirements.txt
+#
+# Python 3.10 or newer: radar_processing.py uses "Dict | None" annotations that are
+# evaluated when the module is imported.
+#
+# tkinter is part of Python on Windows and macOS; on Debian/Ubuntu install python3-tk.
+#
+# Lower bounds are the versions this was verified with, not the oldest that might work.
+
+numpy>=2.0
+scipy>=1.15
+matplotlib>=3.10
+
+# Optional - the application runs without them and switches the named feature off.
+Pillow>=11.1          # window icon
+platformdirs>=4.3     # where the recent-files list is kept
+scikit-learn>=1.6     # PCA / ICA / KMeans scoring in the AI vital-signs tab
+
+# Recording (python -m acquisition, the Measure tab) on Windows needs nothing beyond the
+# above. Only to let a running mmWave Studio configure the radar over its network port
+# (--radar studio), on Windows:
+#   pip install pythonnet
+
+# Recording on macOS and Linux: the radar's UART and the DCA1000's USB are driven from
+# Python (TI's RadarLinkDLL exists only for Windows). libusb too: brew install libusb
+pyserial>=3.5; sys_platform != "win32"
+pyftdi>=0.57; sys_platform != "win32"

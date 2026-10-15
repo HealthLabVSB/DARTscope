@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dist/*
+!dist/DARTscope.exe
+build/
+.buildenv/
+.venv/

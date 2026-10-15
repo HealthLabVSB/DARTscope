@@ -1,273 +1,395 @@
 """
 gui_helper.py
 
-Helper tab (GUI) for radar experiment design and command generation.
-Translates measurement goals (max range, range/velocity resolution) into hardware parameters (bandwidth,
-slope, ADC rate/samples, chirp/frame timing), validates against typical device limits, computes duty cycles,
-and generates mmWave Studio commands. Provides presets for macro/micro motion use cases.
+The Helper tab: a chirp configuration for mmWave Studio from what is to be measured
+(chirp_design.py does the work).
 
-Includes:
-- Parameter calculator with actionable limit guidance (what to increase/decrease).
-- Duty cycle metrics (frame duty, active‑ramp duty).
-- Bandwidth/ADC‑rate checks and profile count hints.
-- Command block generation for mmWave Studio.
+    1. What to measure   the device, a purpose that fills in sensible goals (vital signs,
+                         people and angles, fast limb movements, heart rate of a moving
+                         person, tremor), and the goals themselves; Design.
+    2. Chirp for mmWave Studio   the designed values in mmWave Studio's own terms, which can
+                         be edited or read from the decoded recording, and checked again.
+    3. Script            COM port, mmWave Studio folder and the output file of the Lua
+                         script; Copy Lua and Save Lua on the script page.
+
+On the right: what the configuration gives with every check (ok, warning, error with
+what to change), and the Lua script for mmWave Studio's Lua shell.
 
 Authors: Daniel Barvik, Dan Hruby, and AI
 """
+from __future__ import annotations
+
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import filedialog, messagebox, ttk
+import theme
 
-# --- Module-level variables for the Helper tab ---
-helper_vars = {}
-helper_outputs = {}
-helper_commands_text = None
+import chirp_design as cd
+from flow_layout import FlowFrame, ScrollFrame
 
-def init_helper_tab(parent):
-    """Creates the UI for the Helper tab."""
-    global helper_vars, helper_outputs, helper_commands_text
+LEVEL_FG = {k: theme.LEVEL[k] for k in ("ok", "warning", "error")}
+MARK = {"ok": "ok     ", "warning": "WARNING", "error": "ERROR  "}
 
-    # --- Main layout frames ---
-    top_frame = ttk.Frame(parent)
-    top_frame.pack(side="top", fill="x", padx=10, pady=5)
-    left_frame = ttk.Frame(parent)
-    left_frame.pack(side="left", fill="both", expand=True, padx=10, pady=5)
-    right_frame = ttk.Frame(parent)
-    right_frame.pack(side="right", fill="both", expand=True, padx=10, pady=5)
+GOAL_FIELDS = (
+    ("max_range_m", "Max range [m]"),
+    ("range_res_cm", "Range resolution [cm]"),
+    ("max_vel_ms", "Max velocity [m/s]"),
+    ("vel_res_ms", "Velocity resolution [m/s]"),
+    ("loops_per_frame", "Loops per frame"),
+    ("fps", "Frame rate [fps]"),
+    ("duration_s", "Recording length [s]"),
+    ("rx_gain_db", "RX gain [dB]"),
+    ("start_ghz", "Start frequency [GHz]"),
+    ("idle_us", "Idle time [us]"),
+    ("adc_start_us", "ADC start time [us]"),
+)
+CHIRP_FIELDS = (
+    ("start_ghz", "Start Freq [GHz]"),
+    ("idle_us", "Idle Time [us]"),
+    ("adc_start_us", "ADC Start Time [us]"),
+    ("ramp_end_us", "Ramp End Time [us]"),
+    ("slope_mhz_us", "Frequency Slope [MHz/us]"),
+    ("tx_start_us", "TX Start Time [us]"),
+    ("n_samples", "ADC Samples"),
+    ("fs_ksps", "Sample Rate [ksps]"),
+    ("rx_gain_db", "RX Gain [dB]"),
+    ("tx_order", "TX of each chirp"),
+    ("loops", "No of Chirp Loops"),
+    ("frames", "No of Frames"),
+    ("period_ms", "Periodicity [ms]"),
+)
 
-    # --- Top: Presets and Actions ---
-    ttk.Label(top_frame, text="Preset:", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(0, 5))
-    preset_var = tk.StringVar()
-    preset_combo = ttk.Combobox(top_frame, textvariable=preset_var, values=["Custom", "Long Range (Macro)", "Short Range (Respiration)"], state="readonly")
-    preset_combo.pack(side="left", padx=5)
-    preset_combo.set("Custom")
-    preset_combo.bind("<<ComboboxSelected>>", lambda e: apply_helper_preset(preset_var.get()))
 
-    ttk.Button(top_frame, text="Calculate Parameters", command=calculate_radar_params).pack(side="left", padx=20)
-    ttk.Button(top_frame, text="Generate Commands", command=generate_helper_commands).pack(side="left", padx=5)
+class HelperTab:
+    def __init__(self, parent, get_params=None):
+        self.parent = parent
+        self.get_params = get_params
+        self.design: cd.Design | None = None
+        self.purpose = ""
+        self.goal_vars = {}
+        self.chirp_vars = {}
 
-    # --- Left Side: Inputs and Outputs ---
-    # Input Group
-    input_group = ttk.LabelFrame(left_frame, text="1. Desired Performance")
-    input_group.pack(fill="x", pady=5)
-    inputs = {
-        "max_range_m": ("Max Range [m]", "20"),
-        "range_res_cm": ("Range Resolution [cm]", "5"),
-        "max_vel_ms": ("Max Velocity [m/s]", "1"),
-        "vel_res_ms": ("Velocity Resolution [m/s]", "0.05"),
-        "start_freq_ghz": ("Start Frequency [GHz]", "77"),
-    }
-    for key, (label, default) in inputs.items():
-        row = ttk.Frame(input_group)
+        bar = FlowFrame(parent)
+        bar.pack(side="top", fill="x", padx=10, pady=5)
+        g = bar.group()
+        ttk.Label(g, text="Device:", font=theme.font(10, "bold")).pack(side="left", padx=(0, 4))
+        self.device_var = tk.StringVar(value=next(iter(cd.DEVICES)))
+        dev = ttk.Combobox(g, textvariable=self.device_var, values=list(cd.DEVICES),
+                           state="readonly", width=20)
+        dev.pack(side="left")
+        dev.bind("<<ComboboxSelected>>", lambda _e: self._on_device())
+        g = bar.group()
+        ttk.Label(g, text="Purpose:", font=theme.font(10, "bold")).pack(side="left", padx=(0, 4))
+        self.purpose_var = tk.StringVar(value="Custom")
+        pur = ttk.Combobox(g, textvariable=self.purpose_var,
+                           values=["Custom"] + list(cd.PURPOSES), state="readonly", width=34)
+        pur.pack(side="left")
+        pur.bind("<<ComboboxSelected>>", lambda _e: self._on_purpose())
+        g = bar.group()
+        ttk.Button(g, text="Design", command=self.run_design).pack(side="left", padx=(6, 2))
+        ttk.Button(g, text="Check these values", command=self.run_check).pack(side="left", padx=2)
+        if get_params is not None:
+            ttk.Button(g, text="From the decoded recording",
+                       command=self.from_recording).pack(side="left", padx=2)
+        self.status = tk.StringVar(value="Choose a device and a purpose, then Design.")
+        ttk.Label(bar.group(), textvariable=self.status, foreground=theme.SECONDARY).pack(side="left")
+
+        paned = ttk.PanedWindow(parent, orient="horizontal")
+        paned.pack(side="top", fill="both", expand=True, padx=10, pady=5)
+        left_scroll = ScrollFrame(paned)
+        paned.add(left_scroll, weight=0)
+        left = left_scroll.inner
+        right = ttk.Frame(paned)
+        paned.add(right, weight=1)
+
+        # 1. goals
+        box = ttk.LabelFrame(left, text="1. What to measure")
+        box.pack(fill="x", pady=4)
+        for key, label in GOAL_FIELDS:
+            self.goal_vars[key] = self._row(box, label)
+        row = ttk.Frame(box)
         row.pack(fill="x", padx=5, pady=2)
-        ttk.Label(row, text=label, width=25).pack(side="left")
-        var = tk.StringVar(value=default)
-        ttk.Entry(row, textvariable=var, width=15).pack(side="left")
-        helper_vars[key] = var
-
-    # Output Group
-    output_group = ttk.LabelFrame(left_frame, text="2. Calculated Radar Parameters")
-    output_group.pack(fill="x", pady=5)
-    outputs = {
-        "bandwidth_mhz": "Bandwidth [MHz]", "ramp_slope_mhz_us": "Ramp Slope [MHz/us]",
-        "adc_samples": "ADC Samples", "adc_rate_msps": "ADC Rate [Msps]",
-        "ramp_time_us": "Ramp Time [us]", "idle_time_us": "Idle Time [us]",
-        "chirp_time_us": "Total Chirp Time [us]", "num_chirps": "Chirps per Frame",
-        "frame_period_ms": "Frame Periodicity [ms]",
-        "frame_duty_cycle": "Frame Duty Cycle [%]",
-        "active_ramp_duty_cycle": "Active Ramp Duty Cycle [%]",
-        "max_bw_supported": "Max Bandwidth Supported [GHz]",
-        "max_profiles": "Max Chirp Profiles (HW Limit)",
-    }
-    for key, label in outputs.items():
-        row = ttk.Frame(output_group)
+        ttk.Label(row, text="Transmitters", width=26).pack(side="left")
+        self.tdm_var = tk.StringVar(value="one TX")
+        ttk.Combobox(row, textvariable=self.tdm_var, values=["one TX", "all TX (TDM-MIMO)"],
+                     state="readonly", width=17).pack(side="left")
+        row = ttk.Frame(box)
         row.pack(fill="x", padx=5, pady=2)
-        ttk.Label(row, text=label, width=25).pack(side="left")
-        var = tk.StringVar(value="--")
-        ttk.Label(row, textvariable=var, font=("Segoe UI", 9, "bold")).pack(side="left")
-        helper_outputs[key] = var
+        ttk.Label(row, text="TX for one TX", width=26).pack(side="left")
+        self.single_tx_var = tk.StringVar(value="TX1")
+        self.single_tx_combo = ttk.Combobox(row, textvariable=self.single_tx_var, state="readonly",
+                                            width=6)
+        self.single_tx_combo.pack(side="left")
+        self.back_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Frames back to back (continuous chirping)",
+                        variable=self.back_var).pack(anchor="w", padx=5, pady=2)
 
-    # --- Right Side: Generated Commands ---
-    cmd_group = ttk.LabelFrame(right_frame, text="3. Generated mmWave Studio Commands")
-    cmd_group.pack(fill="both", expand=True, pady=5)
-    helper_commands_text = tk.Text(cmd_group, wrap="word", height=25, width=70, font=("Consolas", 9))
-    ys = ttk.Scrollbar(cmd_group, orient="vertical", command=helper_commands_text.yview)
-    helper_commands_text.config(yscrollcommand=ys.set)
-    ys.pack(side="right", fill="y")
-    helper_commands_text.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        # 2. the chirp in mmWave Studio's terms
+        box = ttk.LabelFrame(left, text="2. Chirp for mmWave Studio")
+        box.pack(fill="x", pady=4)
+        for key, label in CHIRP_FIELDS:
+            self.chirp_vars[key] = self._row(box, label)
 
-def apply_helper_preset(preset_name):
-    if preset_name == "Long Range (Macro)":
-        helper_vars["max_range_m"].set("50")
-        helper_vars["range_res_cm"].set("20")
-        helper_vars["max_vel_ms"].set("5")
-        helper_vars["vel_res_ms"].set("0.5")
-    elif preset_name == "Short Range (Respiration)":
-        helper_vars["max_range_m"].set("2")
-        helper_vars["range_res_cm"].set("1")
-        helper_vars["max_vel_ms"].set("0.2")
-        helper_vars["vel_res_ms"].set("0.02")
-    calculate_radar_params()
+        # 3. the script
+        box = ttk.LabelFrame(left, text="3. Script")
+        box.pack(fill="x", pady=4)
+        self.com_var = self._row(box, "COM port")
+        self.studio_var = self._row(box, "mmWave Studio folder", width=34)
+        self.out_var = self._row(box, "Output file (.bin)", width=34)
 
-def calculate_radar_params():
-    C0 = 299792458.0
-    try:
-        # Clear previous results
-        for var in helper_outputs.values():
-            var.set("--")
+        # right: result and script
+        nb = ttk.Notebook(right)
+        nb.pack(fill="both", expand=True)
+        self.nb = nb
+        page = ttk.Frame(nb)
+        nb.add(page, text="Result")
+        self.result = tk.Text(page, wrap="word", font=theme.mono(9), state="disabled")
+        ys = ttk.Scrollbar(page, orient="vertical", command=self.result.yview)
+        self.result.configure(yscrollcommand=ys.set)
+        ys.pack(side="right", fill="y")
+        self.result.pack(side="left", fill="both", expand=True)
+        for lvl, fg in LEVEL_FG.items():
+            self.result.tag_configure(lvl, foreground=fg)
+        self.result.tag_configure("head", font=theme.mono(10, "bold"))
+        page = ttk.Frame(nb)
+        nb.add(page, text="Lua script")
+        tools = FlowFrame(page)
+        tools.pack(side="top", fill="x", padx=4, pady=4)
+        ttk.Button(tools.group(), text="Copy Lua", command=self.copy_lua).pack(side="left")
+        ttk.Button(tools.group(), text="Save Lua...", command=self.save_lua).pack(side="left")
+        ttk.Label(tools.group(), text="(paste into mmWave Studio's Lua shell, or run the saved file)",
+                  foreground=theme.SECONDARY).pack(side="left")
+        self.lua = tk.Text(page, wrap="none", font=theme.mono(9))
+        ys = ttk.Scrollbar(page, orient="vertical", command=self.lua.yview)
+        xs = ttk.Scrollbar(page, orient="horizontal", command=self.lua.xview)
+        self.lua.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        xs.pack(side="bottom", fill="x")
+        ys.pack(side="right", fill="y")
+        self.lua.pack(side="left", fill="both", expand=True)
 
-        # Read inputs
-        r_max = float(helper_vars["max_range_m"].get())
-        r_res = float(helper_vars["range_res_cm"].get()) / 100.0  # cm to m
-        v_max = float(helper_vars["max_vel_ms"].get())
-        v_res = float(helper_vars["vel_res_ms"].get())
-        f_start = float(helper_vars["start_freq_ghz"].get()) * 1e9 # GHz to Hz
+        self._on_device()
+        self._fill_goals(cd.Goals())
 
-        # --- Determine radar band and limits ---
-        is_77ghz_band = (f_start > 70e9)
-        max_supported_bw_ghz = 4.0 # Typical for both 60 and 77 GHz TI devices
-        # ADC Rate limit is device-specific. Using a general high value for xWR1642/6843.
-        max_adc_rate_msps = 40.0
-        max_profiles = 4 # Typical for AWR1x/6x
+    # --- layout helpers ----------------------------------------------------------------------
+    @staticmethod
+    def _row(parent, label, width=12):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=5, pady=2)
+        ttk.Label(row, text=label, width=26).pack(side="left")
+        var = tk.StringVar(value="")
+        ttk.Entry(row, textvariable=var, width=width).pack(side="left")
+        return var
 
-        # --- Calculations ---
-        # Bandwidth from Range Resolution
-        bandwidth = C0 / (2 * r_res)
+    def _device(self) -> cd.Device:
+        return cd.DEVICES[self.device_var.get()]
 
-        # --- VALIDATION CHECKS ---
-        # 1. Bandwidth Check
-        if (bandwidth / 1e9) > max_supported_bw_ghz:
-            msg = (f"Calculated bandwidth ({bandwidth/1e9:.2f} GHz) exceeds the typical supported limit of {max_supported_bw_ghz} GHz.\n\n"
-                   f"This is caused by a very high 'Range Resolution' requirement.\n\n"
-                   f"To fix this, please INCREASE the 'Range Resolution [cm]' value.")
-            messagebox.showwarning("Bandwidth Limit Exceeded", msg)
+    def _on_device(self):
+        dev = self._device()
+        self.single_tx_combo.configure(values=[f"TX{i}" for i in range(1, dev.n_tx + 1)])
+        if self.single_tx_var.get() not in self.single_tx_combo.cget("values"):
+            self.single_tx_var.set("TX1")
+        self.goal_vars["start_ghz"].set(f"{dev.default_start_ghz:g}")
+        self.com_var.set(str(dev.com_port))
+        self.studio_var.set(dev.studio_dir)
+        self.out_var.set(dev.studio_dir + r"\mmWaveStudio\PostProc\adc_data.bin")
+        self.status.set(f"{dev.name}: {dev.f_lo:g}-{dev.f_hi:g} GHz, {dev.n_tx} TX x {dev.n_rx} RX"
+                        + (f"; {dev.note}" if dev.note else ""))
+
+    def _on_purpose(self):
+        name = self.purpose_var.get()
+        if name in cd.PURPOSES:
+            g = cd.goals_for(name)
+            g.start_ghz = self._device().default_start_ghz
+            self._fill_goals(g)
+            self.run_design()
+
+    def _fill_goals(self, g: cd.Goals):
+        for key, _ in GOAL_FIELDS:
+            v = getattr(g, key)
+            if key == "start_ghz" and v is None:
+                v = self._device().default_start_ghz
+            self.goal_vars[key].set("" if v is None else f"{v:g}")
+        self.tdm_var.set("all TX (TDM-MIMO)" if g.tdm_all_tx else "one TX")
+        self.single_tx_var.set(f"TX{g.single_tx}")
+        self.back_var.set(bool(g.back_to_back))
+
+    def _goals(self) -> cd.Goals:
+        def num(key, cast=float, optional=False):
+            s = self.goal_vars[key].get().strip().replace(",", ".")
+            if not s:
+                if optional:
+                    return None
+                raise ValueError(f"{dict(GOAL_FIELDS)[key]} is empty")
+            return cast(float(s))
+        g = cd.Goals(max_range_m=num("max_range_m"), range_res_cm=num("range_res_cm"),
+                     max_vel_ms=num("max_vel_ms"), vel_res_ms=num("vel_res_ms", optional=True),
+                     loops_per_frame=num("loops_per_frame", int, optional=True), fps=num("fps"),
+                     duration_s=num("duration_s"), rx_gain_db=num("rx_gain_db", int),
+                     start_ghz=num("start_ghz", optional=True), idle_us=num("idle_us"),
+                     adc_start_us=num("adc_start_us"),
+                     tdm_all_tx=self.tdm_var.get().startswith("all"),
+                     single_tx=int(self.single_tx_var.get()[2:] or 1),
+                     back_to_back=bool(self.back_var.get()))
+        if min(g.max_range_m, g.range_res_cm, g.max_vel_ms, g.fps, g.duration_s) <= 0:
+            raise ValueError("range, resolution, velocity, frame rate and length must be above 0")
+        return g
+
+    # --- actions -----------------------------------------------------------------------------
+    def run_design(self):
+        try:
+            g = self._goals()
+        except ValueError as e:
+            messagebox.showerror("Helper", f"Invalid value: {e}")
             return
+        self.purpose = self.purpose_var.get() if self.purpose_var.get() in cd.PURPOSES else ""
+        self._show(cd.design(self._device(), g))
 
-
-        # Chirp time from Max Velocity
-        # Vmax = lambda / (4 * T_inter_chirp)
-        wavelength = C0 / f_start
-        t_inter_chirp = wavelength / (4 * v_max)
-
-        # Number of chirps from Velocity Resolution
-        # Vres = lambda / (2 * Tframe) = lambda / (2 * Nd * T_inter_chirp)
-        nd = round(wavelength / (2 * v_res * t_inter_chirp))
-        nd = max(16, 1 << (nd - 1).bit_length()) # Make it power of 2, min 16
-
-        # Ramp time and ADC sampling rate
-        # Assume ADC sampling time is 80% of ramp time.
-        ramp_time = 0.8 * t_inter_chirp
-        idle_time = 0.2 * t_inter_chirp
-
-        # Ramp slope from bandwidth and ramp time
-        ramp_slope = bandwidth / ramp_time
-
-        # ADC rate from max range and slope
-        f_beat_max = (ramp_slope * 2 * r_max) / C0
-        adc_rate = f_beat_max * 1.25 # 25% margin over max beat freq
-
-        # 2. ADC Sampling Rate Check
-        if (adc_rate / 1e6) > max_adc_rate_msps:
-            msg = (f"Calculated ADC Sampling Rate ({adc_rate/1e6:.2f} Msps) exceeds the typical limit of {max_adc_rate_msps} Msps for this type of device.\n\n"
-                   f"This is caused by a combination of high 'Max Range', high 'Max Velocity', and/or high 'Range Resolution'. The required beat frequency is too high.\n\n"
-                   f"To fix this, try one of the following:\n"
-                   f"  - DECREASE 'Max Range [m]'\n"
-                   f"  - DECREASE 'Max Velocity [m/s]'\n"
-                   f"  - INCREASE 'Range Resolution [cm]'")
-            messagebox.showwarning("ADC Rate Limit Exceeded", msg)
+    def run_check(self):
+        try:
+            vals = {}
+            for key, label in CHIRP_FIELDS:
+                s = self.chirp_vars[key].get().strip().replace(",", ".") if key != "tx_order" \
+                    else self.chirp_vars[key].get()
+                if not s:
+                    raise ValueError(f"{label} is empty - Design first, or type it in")
+                if key == "tx_order":
+                    vals[key] = [int(t.strip().upper().replace("TX", "")) for t in s.replace(";", ",").split(",")
+                                 if t.strip()]
+                elif key in ("n_samples", "fs_ksps", "rx_gain_db", "loops", "frames"):
+                    vals[key] = int(float(s))
+                else:
+                    vals[key] = float(s)
+        except ValueError as e:
+            messagebox.showerror("Helper", f"Invalid value: {e}")
             return
+        try:
+            goals = self._goals()
+        except ValueError:
+            goals = None
+        self._show(cd.evaluate(self._device(), goals, **vals), checked=True)
 
-        # Number of ADC samples
-        adc_samples = int(adc_rate * ramp_time)
-        adc_samples = 1 << (adc_samples - 1).bit_length() # round to next power of 2
+    def from_recording(self):
+        params = self.get_params() if self.get_params else None
+        if not params:
+            messagebox.showwarning("Helper", "Decode a recording first (Decode tab).")
+            return
+        dev = cd.device_for(params)
+        self.device_var.set(dev.name)
+        self._on_device()
+        vals = cd.from_params(params)
+        self.purpose = ""
+        self.purpose_var.set("Custom")
+        self._show(cd.evaluate(dev, None, **vals), checked=True)
+        self.status.set("The configuration of the decoded recording - edit it in 2. and "
+                        "Check these values")
 
-        # Final check: recalculate ADC rate based on rounded samples
-        adc_rate = adc_samples / ramp_time
+    def _show(self, d: cd.Design, checked: bool = False):
+        self.design = d
+        for key, _ in CHIRP_FIELDS:
+            v = getattr(d, key)
+            if key == "tx_order":
+                v = ", ".join(f"TX{t}" for t in v)
+            elif isinstance(v, float):
+                v = cd._f(v, 3)
+            self.chirp_vars[key].set(str(v))
+        self._write_result(d, checked)
+        self._write_lua(d)
+        n_err = sum(c.level == "error" for c in d.checks)
+        n_warn = sum(c.level == "warning" for c in d.checks)
+        self.status.set(("Checked" if checked else "Designed") + f": {n_err} error(s), "
+                        f"{n_warn} warning(s)" + (" - see Result" if n_err or n_warn else ""))
 
-        # Frame periodicity
-        frame_period = nd * t_inter_chirp
+    def _write_result(self, d: cd.Design, checked: bool):
+        t = self.result
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        dev, p = d.device, d.perf
+        t.insert("end", ("The configuration as entered\n" if checked else
+                         f"Designed for: {self.purpose or 'custom goals'}\n"), "head")
+        for s in cd.summary_lines(d):
+            t.insert("end", f"  {s}\n")
+        t.insert("end", "\nProfile (mmWave Studio: SensorConfig > Profile, or ar1.ProfileConfig)\n", "head")
+        rows = [("Start Freq", f"{cd._f(d.start_ghz)} GHz"), ("Idle Time", f"{cd._f(d.idle_us, 2)} us"),
+                ("ADC Start Time", f"{cd._f(d.adc_start_us, 2)} us"),
+                ("Ramp End Time", f"{cd._f(d.ramp_end_us, 2)} us"),
+                ("Frequency Slope", f"{cd._f(d.slope_mhz_us)} MHz/us"),
+                ("TX Start Time", f"{cd._f(d.tx_start_us, 2)} us"), ("ADC Samples", f"{d.n_samples}"),
+                ("Sample Rate", f"{d.fs_ksps} ksps"), ("RX Gain", f"{d.rx_gain_db} dB")]
+        for k, v in rows:
+            t.insert("end", f"  {k:<18}{v}\n")
+        t.insert("end", "\nChirps (SensorConfig > Chirp, or ar1.ChirpConfig)\n", "head")
+        for i, tx in enumerate(d.tx_order):
+            t.insert("end", f"  chirp {i}: profile 0, TX{tx} on\n")
+        t.insert("end", "\nFrame (SensorConfig > Frame, or ar1.FrameConfig)\n", "head")
+        t.insert("end", f"  Start Chirp {0}, End Chirp {len(d.tx_order) - 1}, No of Frames {d.frames}, "
+                        f"No of Chirp Loops {d.loops}, Periodicity {cd._f(d.period_ms, 2)} ms\n")
+        t.insert("end", "\nWhat it gives\n", "head")
+        rows = [("range resolution", f"{p['range_res_cm']:.2f} cm (effective bandwidth "
+                                     f"{p['bandwidth_eff_ghz']:.2f} GHz of {p['sweep_ghz']:.2f} swept)"),
+                ("maximum range", f"{p['max_range_m']:.2f} m"),
+                ("maximum velocity", f"+-{p['max_vel_ms']:.2f} m/s"),
+                ("velocity resolution", f"{p['vel_res_ms']:.3f} m/s"),
+                ("chirp", f"{p['chirp_time_us']:.2f} us, sampling {p['adc_time_us']:.2f} us"),
+                ("frame", f"{p['chirps_per_frame']} chirps, {p['active_ms']:.2f} ms of "
+                          f"{cd._f(d.period_ms, 2)} ms, {p['fps']:.1f} fps"),
+                ("data", f"{p['rate_mb_s']:.1f} MB/s on average, {p['burst_mb_s']:.0f} MB/s while "
+                         f"chirping, {p['rate_mb_s'] * d.frames * d.period_ms / 1e6:.2f} GB in all"),
+                ("wavelength", f"{p['wavelength_mm']:.3f} mm")]
+        for k, v in rows:
+            t.insert("end", f"  {k:<20}{v}\n")
+        t.insert("end", "\nChecks\n", "head")
+        order = {"error": 0, "warning": 1, "ok": 2}
+        for c in sorted(d.checks, key=lambda c: order[c.level]):
+            t.insert("end", f"  {MARK[c.level]} {c.what}: {c.message}\n", c.level)
+        t.insert("end", f"\nDevice limits used ({dev.name}): {dev.f_lo:g}-{dev.f_hi:g} GHz, "
+                        f"{dev.max_bw_ghz:g} GHz sweep, slope <= {dev.max_slope:g} MHz/us, "
+                        f"sampling <= {dev.max_fs_ksps} ksps "
+                        f"({'complex' if dev.complex_samples else 'real'})"
+                        + (f", IF <= {dev.max_if_mhz:g} MHz" if dev.max_if_mhz else "")
+                        + (f". {dev.note}." if dev.note else ".") + "\n")
+        t.configure(state="disabled")
 
-        # --- Duty Cycle Calculations ---
-        # Total active time for all chirps in a frame
-        total_chirp_time_in_frame = nd * t_inter_chirp
-        # Frame duty cycle: (total active time) / (total frame time)
-        frame_duty_cycle = (total_chirp_time_in_frame / frame_period) * 100 if frame_period > 0 else 0
-        # Active ramp duty cycle: (ramp time) / (total chirp time)
-        active_ramp_duty_cycle = (ramp_time / t_inter_chirp) * 100 if t_inter_chirp > 0 else 0
+    def _write_lua(self, d: cd.Design):
+        try:
+            com = int(self.com_var.get())
+        except ValueError:
+            com = None
+        script = cd.lua_script(d, com_port=com, studio_dir=self.studio_var.get().strip() or None,
+                               out_bin=self.out_var.get().strip() or None, purpose=self.purpose)
+        self.lua.delete("1.0", "end")
+        self.lua.insert("1.0", script)
+
+    def copy_lua(self):
+        if self.design is None:
+            messagebox.showwarning("Helper", "Design first.")
+            return
+        self._write_lua(self.design)             # the script fields may have changed
+        self.parent.clipboard_clear()
+        self.parent.clipboard_append(self.lua.get("1.0", "end"))
+        self.status.set("Lua script copied - paste it into mmWave Studio's Lua shell")
+
+    def save_lua(self):
+        if self.design is None:
+            messagebox.showwarning("Helper", "Design first.")
+            return
+        self._write_lua(self.design)
+        path = filedialog.asksaveasfilename(defaultextension=".lua", initialfile="chirp_config.lua",
+                                            filetypes=[("Lua scripts", "*.lua")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.lua.get("1.0", "end"))
+        except OSError as e:
+            messagebox.showerror("Helper", f"Could not save: {e}")
+            return
+        self.status.set(f"Saved {path} - run it from mmWave Studio's Lua shell (dofile)")
 
 
-        # --- Update GUI ---
-        helper_outputs["bandwidth_mhz"].set(f"{bandwidth / 1e6:.2f}")
-        helper_outputs["ramp_slope_mhz_us"].set(f"{ramp_slope / 1e12:.2f}")
-        helper_outputs["adc_samples"].set(f"{adc_samples}")
-        helper_outputs["adc_rate_msps"].set(f"{adc_rate / 1e6:.2f}")
-        helper_outputs["ramp_time_us"].set(f"{ramp_time * 1e6:.1f}")
-        helper_outputs["idle_time_us"].set(f"{idle_time * 1e6:.1f}")
-        helper_outputs["chirp_time_us"].set(f"{t_inter_chirp * 1e6:.1f}")
-        helper_outputs["num_chirps"].set(f"{nd}")
-        helper_outputs["frame_period_ms"].set(f"{frame_period * 1e3:.2f}")
-        # NEW: Update new fields
-        helper_outputs["frame_duty_cycle"].set(f"{frame_duty_cycle:.1f}")
-        helper_outputs["active_ramp_duty_cycle"].set(f"{active_ramp_duty_cycle:.1f}")
-        helper_outputs["max_bw_supported"].set(f"{max_supported_bw_ghz:.1f}")
-        helper_outputs["max_profiles"].set(f"{max_profiles}")
+helper_tab = None
 
 
-    except (ValueError, ZeroDivisionError) as e:
-        for var in helper_outputs.values():
-            var.set("-- Error --")
-        messagebox.showerror("Calculation Error", f"Invalid input or calculation failed: {e}")
-
-def generate_helper_commands():
-    if "--" in helper_outputs["bandwidth_mhz"].get():
-        messagebox.showwarning("Warning", "Please calculate parameters first.")
-        return
-
-    # Read calculated values
-    start_freq = float(helper_vars["start_freq_ghz"].get())
-    idle_time_us = float(helper_outputs["idle_time_us"].get())
-    adc_start_time_us = 6 # A common default
-    ramp_time_us = float(helper_outputs["ramp_time_us"].get())
-    adc_samples = int(helper_outputs["adc_samples"].get())
-    adc_rate_ksps = float(helper_outputs["adc_rate_msps"].get()) * 1000
-    ramp_slope_mhz_us = float(helper_outputs["ramp_slope_mhz_us"].get())
-    num_chirps = int(helper_outputs["num_chirps"].get())
-    frame_period_ms = float(helper_outputs["frame_period_ms"].get())
-
-    # Assuming 1 TX, 4 RX
-    tx_mask = 1
-    rx_mask = 15
-
-    # Format commands
-    commands = f"""
-% Stop sensor if running
-sensorStop
-
-% Flush any existing configuration
-flushCfg
-
-% Chirp and Profile Configuration
-% Profile: 0, Start Freq: {start_freq:.3f} GHz, Idle Time: {idle_time_us:.1f} us, ADC Start: {adc_start_time_us:.1f} us, Ramp End: {ramp_time_us:.1f} us, TX Power: 0, TX Phase: 0, Slope: {ramp_slope_mhz_us:.3f} MHz/us, ADC Samples: {adc_samples}, ADC Rate: {adc_rate_ksps:.0f} ksps, HPF1: 0, HPF2: 0, RX Gain: 30 dB
-profileCfg 0 {start_freq:.3f} {idle_time_us:.1f} {adc_start_time_us:.1f} {ramp_time_us:.1f} 0 0 {ramp_slope_mhz_us:.3f} 0 {adc_samples} {adc_rate_ksps:.0f} 0 0 30
-
-% Chirp: Start: 0, End: 0, Profile: 0, Start Freq Var: 0, Slope Var: 0, Idle Var: 0, ADC Start Var: 0, TX Mask: {tx_mask}
-chirpCfg 0 0 0 0 0 0 0 {tx_mask}
-
-% Frame Configuration
-% Start Chirp: 0, End Chirp: 0, Loops: {num_chirps}, Frames: 0 (infinite), Periodicity: {frame_period_ms:.2f} ms, Trigger: SW
-frameCfg 0 0 {num_chirps} 0 {frame_period_ms:.2f} 1 0
-
-% Data format and path
-% Using default real data, 16 bits, non-interleaved
-adcbufCfg -1 0 1 1 1
-adcCfg 2 1
-% LVDS path for DCA1000
-dataPathConfig {rx_mask} 1 0
-lvdsStreamCfg -1 0 1 0
-% Data format: 16-bit, Real, non-interleaved, IQ order doesn't matter for real
-dataFmtConfig -1 2 0 0 0 0
-
-% Start sensor
-sensorStart
-"""
-    helper_commands_text.delete("1.0", tk.END)
-    helper_commands_text.insert("1.0", commands.strip())
+def init_helper_tab(parent, get_params=None):
+    """Builds the Helper tab; get_params() returns the decoded recording's parameters."""
+    global helper_tab
+    helper_tab = HelperTab(parent, get_params)
+    return helper_tab

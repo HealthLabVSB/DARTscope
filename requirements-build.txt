@@ -1,0 +1,16 @@
+# Building DARTscope.exe - in a clean virtual environment, not in Anaconda: Anaconda's numpy
+# is built on Intel MKL and PyInstaller then bundles ~700 MB of MKL libraries (a 300 MB exe
+# that unpacks 830 MB at every start). The PyPI wheels use OpenBLAS: an exe of ~100 MB.
+# Versions: those the program is developed and tested with.
+#
+#   python -m venv .buildenv
+#   .buildenv\Scripts\python -m pip install -r requirements-build.txt
+#   .buildenv\Scripts\python -m PyInstaller DARTscope.spec --noconfirm --clean
+#
+numpy==2.0.0
+scipy==1.15.3
+matplotlib==3.10.0
+scikit-learn==1.6.1
+pillow==11.1.0
+platformdirs==4.3.7
+pyinstaller==6.22.3
