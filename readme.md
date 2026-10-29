@@ -1,4 +1,4 @@
-# DARTscope 2.0
+# DARTscope 2.1
 
 Recording and analysis of TI mmWave radar data captured with the DCA1000EVM: a GUI that records
 with the radar (without mmWave Studio), checks a recording, and analyses it - range, velocity,
@@ -11,7 +11,7 @@ batch work.
 
 ## Download and start (Windows)
 
-Run **`DARTscope.exe`** - from the [GitHub Release v2.0](https://github.com/HealthLabVSB/DARTscope/releases/tag/v2.0)
+Run **`DARTscope.exe`** - from the [GitHub Release v2.1](https://github.com/HealthLabVSB/DARTscope/releases/tag/v2.1)
 or [`dist/DARTscope.exe`](dist/DARTscope.exe) in this repository. Nothing has to be installed. The
 program has no console window; everything it reports appears in its **Log** tab.
 
@@ -23,6 +23,18 @@ program has no console window; everything it reports appears in its **Log** tab.
 - The first recording makes Windows ask whether DARTscope may use the network: allow it, for
   public networks too (the DCA1000's network usually counts as one), or no data arrive.
 - Video export (MP4) additionally needs `ffmpeg` on the system PATH.
+
+## What is new in 2.1
+
+- **Heart-rate options of the T-MTT case study**, all opt-in - the default chain is unchanged:
+  a notch on every breathing harmonic (`breath_notch="comb"`), prewhitening of the heart-band
+  displacement (`heart_prewhiten`, velocity or acceleration), the source of the heart spectrum
+  (`heart_method`), and the band-edge index Q_edge with its gate (`q_edge_min`,
+  `moving_hr.edge_index`). They are keys of the Vitals configuration (`vitalsigns.py`).
+- **The article's analysis scripts** in [`tools/paper`](tools/paper) (vital-sign chain, variants,
+  calibration, tables) and [`tools/paper_array`](tools/paper_array) (localization, SNR model,
+  interference, TDM, phase-error simulation) - see *Reproducing the article* below.
+- **The test suite**: `pip install -r requirements-dev.txt`, then `python -m pytest -q`.
 
 ## What is new in 2.0
 
@@ -98,6 +110,27 @@ of the manual.
 | `python -m tools.calibrate` | antenna calibration from a corner reflector and its check |
 | `python -m tools.cascade_protocol` | verification of the cascade's presets from their own takes ([`docs/CASCADE_PROTOCOL.md`](docs/CASCADE_PROTOCOL.md)) |
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+The tests run on synthetic signals. The few that need the laboratory's recordings look for them
+under `DARTSCOPE_DATA` and are skipped without it.
+
+## Reproducing the article
+
+The recordings of the article - 41 takes with their SOMNOtouch reference - are on Zenodo:
+[10.5281/zenodo.23762780](https://doi.org/10.5281/zenodo.23762780) (CC BY 4.0). `python -m
+tools.vitals_check <set folder> --reference <set folder>/reference` evaluates the Vitals view on
+them. The scripts in `tools/paper` and `tools/paper_array` produced the tables of the article;
+they read their folders from `DARTSCOPE_PAPER_DATA`, `DARTSCOPE_PAPER_CACHE`,
+`DARTSCOPE_PAPER_OUT` and `DARTSCOPE_PAPER_FIGURES`, and expect the recordings under the names
+they were made with, before the anonymized names of the dataset. The figures of the article were
+drawn by the application.
+
 ## Repository structure
 
 | Module | Responsibility |
@@ -114,7 +147,8 @@ of the manual.
 | **`cascade/`**, **`cascade_gui.py`** | The AWR2243 cascade: settings, JTAG ([`cascade/firmware`](cascade/firmware) - TI's SDK cascade test with runtime settings), takes, calibration. |
 | **`gui_helper.py`**, **`chirp_design.py`** | The Helper tab: radar configuration calculator. |
 | **`theme.py`**, **`flow_layout.py`**, **`plot_interactivity.py`**, **`frame_cache.py`**, **`frame_marker.py`**, **`playback.py`**, **`log_view.py`**, **`manual*.py`** | Look, layout, plots, playback, Log and Manual tabs. |
-| **`tools/`** | The command-line tools above. |
+| **`tools/`** | The command-line tools above; `tools/paper*` the article's analysis scripts. |
+| **`test_*.py`**, **`conftest.py`**, **`*_synth.py`** | The test suite and its synthetic recordings. |
 
 ## Processing chain
 

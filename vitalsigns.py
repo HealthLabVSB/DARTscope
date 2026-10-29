@@ -463,7 +463,8 @@ DEFAULT_CONFIG = dict(auto_bin=True, bin_idx=0, roi_hw=1, roi_mode="Best bin in 
                       conf_thresh=DEFAULT_CONF_THRESH)
 
 
-def heart_rate_track(d, fps, bands, win_s, step_s, br_t=None, br_v=None):
+def heart_rate_track(d, fps, bands, win_s, step_s, br_t=None, br_v=None, breath_notch=None,
+                     method="auto", prewhiten=False):
     """
     (times, rates, confidences, grid, spectra) of the heart in displacement d, window
     by window: moving_hr.heart_spectra and heart_track (harmonic sum, Viterbi path),
@@ -483,7 +484,13 @@ def heart_rate_track(d, fps, bands, win_s, step_s, br_t=None, br_v=None):
     wins = moving_hr._windows(len(d), fps, win_s, fine)
     tc = np.array([(a + b) / 2.0 / fps for a, b in wins])
     br = np.interp(tc, br_t, br_v) if br_t is not None and len(br_t) else np.full(tc.size, np.nan)
-    grid, spec = moving_hr.heart_spectra(d - d.mean(), fps, bands, wins, br_bpm=br)
+    # breath_notch (opt-in): None / "2-4" the default 2nd-4th harmonic, "comb" all of them
+    # opt-in (defaults unchanged): breath_notch "comb" = every breathing harmonic notched;
+    # method "envelope"/"displacement" = one part of the spectra only; prewhiten = the
+    # heart-band displacement differentiated first (moving_hr.heart_spectra)
+    grid, spec = moving_hr.heart_spectra(d - d.mean(), fps, bands, wins, br_bpm=br,
+                                         breath_harmonics=breath_notch, method=method,
+                                         prewhiten=prewhiten)
     hr, conf, _ = moving_hr.heart_track(spec, grid, fine)
     conf = conf * (DEFAULT_CONF_THRESH / moving_hr.CONF_MIN)
     hr = np.asarray(hr, float)
@@ -620,6 +627,9 @@ def process_vital_signs_logic(
         - resp_bpm, heart_bpm ((low, high), optional): the search bands; default are
           the shared ones in vital_bands.py
         - damaged_frames (bool array, optional)
+        - opt-in, absent = default behaviour: breath_notch ("2-4" | "comb"),
+          heart_method ("auto" | "envelope" | "displacement"), heart_prewhiten (bool),
+          q_edge_min (float, Q_edge gate on the heart confidence)
     """
     F, C, RX, R = rfft_cube.shape
     bands = vital_bands.from_config(config)
@@ -768,7 +778,18 @@ def process_vital_signs_logic(
     # passed the confidence bar in fewer than half the windows.
     if with_hr:
         hr_t, hr_v, hr_c, hr_grid, hr_spec = heart_rate_track(d_heart, fps, bands, w_hr, step,
-                                                             rr_t, rr_v)
+                                                             rr_t, rr_v,
+                                                             breath_notch=config.get('breath_notch'),
+                                                             method=config.get('heart_method', 'auto'),
+                                                             prewhiten=config.get('heart_prewhiten', False))
+        # opt-in Q_edge gate (config 'q_edge_min', default None = off): an estimate closer
+        # to the band's low edge or a breathing harmonic than q_edge_min resolutions
+        # (moving_hr.edge_index) is not confident
+        if config.get('q_edge_min') is not None and len(hr_v):
+            import moving_hr
+            q_e, _, _ = moving_hr.edge_index(hr_v, bands.heart_bpm, np.interp(hr_t, rr_t, rr_v)
+                                             if len(rr_t) else np.nan, w_hr)
+            hr_c = np.where(q_e < float(config['q_edge_min']), 0.0, hr_c)
     else:
         hr_t, hr_v, hr_c, hr_grid, hr_spec = np.array([]), np.array([]), np.array([]), None, None
 

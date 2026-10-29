@@ -619,8 +619,26 @@ def _notch(freq_hz, centres_hz, width_hz, hard_hz: float = 0.0):
 
 # --- the heart --------------------------------------------------------------------------------
 
+def breath_harmonic_orders(br_bpm: float, top_hz: float, mode=None) -> list:
+    """
+    The breathing harmonics notched out of the heart spectra. mode None or "2-4" (the
+    default): the 2nd to 4th, as BREATH_NOTCH always did. "comb" (opt-in): EVERY
+    harmonic m >= 2 up to top_hz - a paced breath of 6-9 /min puts its 2nd-4th harmonic
+    below a 50 bpm heart band and its 6th-10th inside it, which the default leaves alone.
+    A sequence of ints: those orders.
+    """
+    if mode is None or mode == "2-4":
+        return list(range(2, 5))
+    if mode == "comb":
+        if not np.isfinite(br_bpm) or br_bpm <= 0:
+            return []
+        return list(range(2, int(np.floor(top_hz * 60.0 / br_bpm)) + 1))
+    return [int(m) for m in mode]
+
+
 def heart_spectra(d: np.ndarray, fs: float, bands, wins, *, br_bpm=None, cadence_hz=None,
-                  rest=None, method: str = "auto"):
+                  rest=None, method: str = "auto", breath_harmonics=None,
+                  prewhiten: int = 0):
     """
     (grid [bpm], spectra (windows x grid)) of the heart in the chest displacement d,
     one normalised harmonic sum per window (s0, s1) of wins.
@@ -631,6 +649,14 @@ def heart_spectra(d: np.ndarray, fs: float, bands, wins, *, br_bpm=None, cadence
     person is still; with method "auto" the displacement is used only there - in
     motion the bounce of the steps sits 50 dB above the heart and the sidelobes of its
     line alone reach it - and the envelope of the 5-25 Hz content always.
+    breath_harmonics: which breathing harmonics are notched (breath_harmonic_orders):
+    None = the 2nd-4th (default), "comb" = all of them up to the top of the sum.
+    prewhiten (opt-in, default False): the heart-band displacement differentiated (the
+    chest velocity; prewhiten=2: twice, the acceleration) before its spectra - a +20
+    (+40) dB/decade tilt. The breathing line, 10-40
+    times the heart's amplitude, leaves a tail rising towards the band's low edge in the
+    displacement, and on the October recordings the harmonic sum was won by that edge
+    (median estimates 50-65 bpm) where the heart was at 79-90. The envelope part is left as it is.
     """
     n_w = len(wins)
     br_bpm = np.full(n_w, np.nan) if br_bpm is None else np.asarray(br_bpm, float)
@@ -639,6 +665,8 @@ def heart_spectra(d: np.ndarray, fs: float, bands, wins, *, br_bpm=None, cadence
     hr_lo, hr_hi = bands.heart_hz
     top = min(hr_hi + 1.0, 0.45 * fs)
     disp_band = _bandpass(d, fs, max(0.5, hr_lo - 0.3), top)
+    for _ in range(int(prewhiten)):            # True = 1: velocity, 2: acceleration
+        disp_band = np.gradient(disp_band) * fs
     env = None
     if method in ("envelope", "both", "auto") and fs > 2 * ENVELOPE_BAND_HZ[0] + 2:
         a = _bandpass(d, fs, ENVELOPE_BAND_HZ[0], ENVELOPE_BAND_HZ[1])
@@ -652,7 +680,8 @@ def heart_spectra(d: np.ndarray, fs: float, bands, wins, *, br_bpm=None, cadence
         breath = np.ones(allf.size)                          # breathing: the displacement only
         df = 0.6 / ((s1 - s0) / fs)                          # about 3 bpm in 12 s windows
         if np.isfinite(br_bpm[i]) and BREATH_NOTCH:
-            breath = _notch(allf, [m * br_bpm[i] / 60.0 for m in range(2, 5)], df)
+            orders = breath_harmonic_orders(br_bpm[i], float(allf.max()) + df, breath_harmonics)
+            breath = _notch(allf, [m * br_bpm[i] / 60.0 for m in orders], df)
         if np.isfinite(cadence_hz[i]):
             notch *= _notch(allf, [m * cadence_hz[i] for m in (0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6)], df)
         # The envelope of the 5-25 Hz content holds no breathing harmonics, and notched
@@ -670,6 +699,33 @@ def heart_spectra(d: np.ndarray, fs: float, bands, wins, *, br_bpm=None, cadence
             hs += h / (h.sum() + 1e-30)
         spectra[i] = hs / (hs.sum() + 1e-30)
     return grid, spectra
+
+
+def edge_index(hr_bpm, band_bpm, br_bpm, win_s: float, harmonics=None):
+    """
+    Q_edge of heart-rate estimates (opt-in quality index; the default chain does not use
+    it): how far each estimate hr_bpm sits from the nearer edge of the heart band, in
+    units of the window's frequency resolution 60 / win_s bpm (2 bpm in 30 s). A track
+    that leans on an edge (a spectrum still rising there - the tail of breathing at the
+    low edge, a tilted floor at the high one) has Q_edge near 0.
+    harmonics (opt-in, default None): also the distance to the nearest breathing
+    harmonic m * br_bpm ("2-4" / "comb", breath_harmonic_orders), q_edge then the
+    smaller of the two.
+    Returns (q_edge, q_band, q_harm); q_harm = inf where not computed.
+    """
+    hr = np.atleast_1d(np.asarray(hr_bpm, float))
+    br = np.broadcast_to(np.asarray(br_bpm, float), hr.shape)
+    res = 60.0 / float(win_s)
+    q_band = np.minimum(hr - float(band_bpm[0]), float(band_bpm[1]) - hr) / res
+    q_harm = np.full(hr.shape, np.inf)
+    top_hz = float(band_bpm[1]) / 60.0 + 0.5
+    for i in range(hr.size):
+        if np.isfinite(br[i]) and br[i] > 0 and np.isfinite(hr[i]):
+            m = np.asarray(breath_harmonic_orders(br[i], top_hz, harmonics or "comb"), float)
+            if m.size:
+                q_harm[i] = float(np.min(np.abs(hr[i] - m * br[i]))) / res
+    q_edge = q_band if harmonics is None else np.minimum(q_band, q_harm)
+    return q_edge, q_band, q_harm
 
 
 def rest_heart(chest: ChestSignal, n_frames: int):

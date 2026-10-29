@@ -1,0 +1,11 @@
+# DARTscope - tests
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest -q
+#
+# Tests that need the laboratory's recordings look for them under $DARTSCOPE_DATA and are
+# skipped without it.
+
+-r requirements.txt
+
+pytest>=8.4

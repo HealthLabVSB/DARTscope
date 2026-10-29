@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use DARTscope in your research or work, please cite it using the metadata below."
 title: "DARTscope"
-version: "2.0"
-date-released: "2026-10-15"
+version: "2.1"
+date-released: "2026-10-29"
 license: MIT
 repository-code: "https://github.com/HealthLabVSB/DARTscope"
 abstract: >
