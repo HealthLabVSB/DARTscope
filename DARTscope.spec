@@ -39,7 +39,9 @@ a = Analysis(
            ('.py32', 'py32'),                                  # the 32-bit Python itself
            ('cascade/jtag_cfg.js', 'cascade'),                 # cascade radar: JTAG script,
            ('cascade/AM273x_XDS110.ccxml', 'cascade'),         # its target configuration
-           ('cascade/firmware/am273x_cascade_param.xer5f', 'cascade/firmware')],  # and firmware
+           ('cascade/firmware/am273x_cascade_param.xer5f', 'cascade/firmware'),  # and firmware
+           ('cascade/firmware/LICENSE-TI.txt', 'cascade/firmware'),  # its TI BSD-3 notice
+           ('LICENSE', '.')],                                  # DARTscope's MIT license
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
