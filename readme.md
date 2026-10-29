@@ -144,7 +144,7 @@ MIT - see [`LICENSE`](LICENSE). If you use DARTscope in your research or work, p
 ([`CITATION.cff`](CITATION.cff)).
 
 Third-party parts: the cascade firmware is built from TI's mmWave MCU+ SDK test code (BSD-3-Clause,
-Texas Instruments - [`cascade/firmware`](cascade/firmware)); [`.py32/`](.py32) is python.org's
+Texas Instruments - [`cascade/firmware/LICENSE-TI.txt`](cascade/firmware/LICENSE-TI.txt)); [`.py32/`](.py32) is python.org's
 Python (PSF License, its `LICENSE.txt`); the exe bundles numpy, scipy, matplotlib, scikit-learn
 and Pillow under their licenses.
 
